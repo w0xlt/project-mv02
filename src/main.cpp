@@ -178,19 +178,28 @@ int main() {
             for (size_t i = 0; i < input_count; i++) {
                 const btck_TransactionInput* input = btck_transaction_get_input_at(tx, i);
 
-                btck_OutPoint op{};
-                if (btck_transaction_input_get_prevout(input, &op) != 0) {
-                    fprintf(stderr, "Failed to retrieve prevout for input %zu\n", i);
+                const btck_TransactionOutPoint* out_point = btck_transaction_input_get_out_point(input);
+
+                const btck_Txid* out_point_txid = btck_transaction_out_point_get_txid(out_point);
+                
+                uint32_t out_point_index = btck_transaction_out_point_get_index(out_point);
+
+                char* c_hex = btck_txid_to_hex(out_point_txid);
+                if (!c_hex) {
+                    fprintf(stderr, "btck_txid_to_hex failed\n");
                     ok = false; break;
                 }
 
-                printf("txid: %s, n: %u\n", op.txid, op.n);
+                std::string out_point_txid_hex{c_hex};
+                btck_string_free(c_hex);
+
+                printf("txid: %s, n: %u\n", out_point_txid_hex.c_str(), out_point_index);
 
                 // Query UTXO set (typically include_mempool=false for pure UTXO set)
-                nlohmann::json result = rpc_call_gettxout(op.txid, op.n, /*include_mempool=*/false);
+                nlohmann::json result = rpc_call_gettxout(out_point_txid_hex, out_point_index, /*include_mempool=*/false);
                 if (result.is_null() || !result.contains("scriptPubKey") ||
                     !result["scriptPubKey"].contains("hex") || !result.contains("value")) {
-                    fprintf(stderr, "Missing prevout data for %s:%u\n", op.txid, op.n);
+                    fprintf(stderr, "Missing prevout data for %s:%u\n", out_point_txid_hex.c_str(), out_point_index);
                     ok = false; break;
                 }
 
@@ -198,7 +207,7 @@ int main() {
                 std::vector<unsigned char> spk_bytes = from_hex(spk_hex);
                 btck_ScriptPubkey* spk = btck_script_pubkey_create(spk_bytes.data(), spk_bytes.size());
                 if (!spk) {
-                    fprintf(stderr, "scriptPubKey parse failed for %s:%u\n", op.txid, op.n);
+                    fprintf(stderr, "scriptPubKey parse failed for %s:%u\n", out_point_txid_hex.c_str(), out_point_index);
                     ok = false; break;
                 }
 
@@ -209,7 +218,7 @@ int main() {
                 btck_TransactionOutput* out = btck_transaction_output_create(spk, value_sats);
                 if (!out) {
                     btck_script_pubkey_destroy(spk);
-                    fprintf(stderr, "TransactionOutput create failed for %s:%u\n", op.txid, op.n);
+                    fprintf(stderr, "TransactionOutput create failed for %s:%u\n", out_point_txid_hex.c_str(), out_point_index);
                     ok = false; break;
                 }
 
