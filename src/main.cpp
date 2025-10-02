@@ -8,6 +8,18 @@
 #include <cstdio>
 #include "bitcoinkernel.h"
 
+std::string TxidToHexReversed(const std::vector<unsigned char>& txid_bytes)
+{
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+
+    // iterate in reverse order
+    for (auto it = txid_bytes.rbegin(); it != txid_bytes.rend(); ++it) {
+        oss << std::setw(2) << static_cast<int>(*it);
+    }
+    return oss.str();
+}
+
 // Read ~/.bitcoin/.cookie -> "user:token"
 static std::string read_cookie() {
     const char* home = std::getenv("HOME");
@@ -175,6 +187,8 @@ int main() {
 
             bool ok = true;
 
+            printf("input_count: %lu\n", input_count);
+
             for (size_t i = 0; i < input_count; i++) {
                 const btck_TransactionInput* input = btck_transaction_get_input_at(tx, i);
 
@@ -184,14 +198,9 @@ int main() {
                 
                 uint32_t out_point_index = btck_transaction_out_point_get_index(out_point);
 
-                char* c_hex = btck_txid_to_hex(out_point_txid);
-                if (!c_hex) {
-                    fprintf(stderr, "btck_txid_to_hex failed\n");
-                    ok = false; break;
-                }
-
-                std::string out_point_txid_hex{c_hex};
-                btck_string_free(c_hex);
+                std::vector<unsigned char> txid_bytes(32, 0);
+                btck_txid_to_bytes(out_point_txid, txid_bytes.data());
+                std::string out_point_txid_hex = TxidToHexReversed(txid_bytes);
 
                 printf("txid: %s, n: %u\n", out_point_txid_hex.c_str(), out_point_index);
 
