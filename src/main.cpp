@@ -128,29 +128,21 @@ static std::vector<unsigned char> from_hex(const std::string& hex) {
     return out;
 }
 
-static uint64_t btc_to_sats_exact(const nlohmann::json& jnum) {
-    // Turn the JSON number into its textual form (e.g., 0.123 -> "0.123")
-    std::string s = jnum.dump();          // dump never quotes numbers
-    // Normalize
+static uint64_t btc_to_sats(const nlohmann::json& jnum) {
+    std::string s = jnum.dump();
+    if (s.find('e') != std::string::npos || s.find('E') != std::string::npos) {
+        long double ld = std::strtold(s.c_str(), nullptr);
+        return (uint64_t) llround(ld * 100000000.0L);
+    }
     auto dot = s.find('.');
     std::string intp = (dot == std::string::npos) ? s : s.substr(0, dot);
     std::string frac = (dot == std::string::npos) ? "" : s.substr(dot + 1);
-
-    // Remove optional leading '+', handle sign if you want (amounts should be >=0)
-    if (!intp.empty() && intp[0] == '+') intp.erase(0, 1);
-
-    // Truncate/pad to exactly 8 fractional digits
+    if (intp.empty() || intp == "-") intp = "0";
     if (frac.size() > 8) frac.resize(8);
     while (frac.size() < 8) frac.push_back('0');
-
-    // Edge cases like ".5" or "-.5"
-    if (intp.empty() || intp == "-") intp += "0";
-
-    // Convert
-    uint64_t sats = 0;
-    // (Amounts from gettxout are non-negative)
-    sats = std::stoull(intp) * 100'000'000ULL + (frac.empty() ? 0ULL : std::stoull(frac));
-    return sats;
+    uint64_t whole = std::stoull(intp);
+    uint64_t frac8 = frac.empty() ? 0ULL : std::stoull(frac);
+    return whole * 100000000ULL + frac8;
 }
 
 int main() {
@@ -221,7 +213,9 @@ int main() {
                 }
 
                 // Parse value in sats (JSON returns BTC)
-                uint64_t value_sats = btc_to_sats_exact(result["value"]);
+                uint64_t value_sats = btc_to_sats(result["value"]);
+
+                printf("value_sats: %lu\n", value_sats);
 
                 // Build a TxOut for the prevout
                 btck_TransactionOutput* out = btck_transaction_output_create(spk, value_sats);
