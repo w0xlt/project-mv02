@@ -269,14 +269,31 @@ int main() {
                 }
             }
 
+
+            // === Compute fee (sum(inputs) - sum(outputs)) ===
+            int64_t sum_inputs_sats = 0;
+            for (size_t i = 0; i < amounts_sats.size(); ++i) {
+                sum_inputs_sats += static_cast<int64_t>(amounts_sats[i]);
+            }
+
+            int64_t sum_outputs_sats = 0;
+            size_t output_count = btck_transaction_count_outputs(tx);
+            for (size_t i = 0; i < output_count; ++i) {
+                const btck_TransactionOutput* out_i = btck_transaction_get_output_at(tx, i);
+                int64_t amt_i = btck_transaction_output_get_amount(out_i);
+                sum_outputs_sats += amt_i;
+            }
+
+            int64_t fee_sats = sum_inputs_sats - sum_outputs_sats;
+
             // === Cleanup ===
             for (auto* s : spks)        btck_script_pubkey_destroy(s);
             btck_transaction_destroy(tx);
 
             crow::json::wvalue res;
 
-
-            res["verification"] = "Test";
+            res["txid"] = txid_hex;
+            res["fee_sats"] = fee_sats;
 
             return crow::response(200, res);
 

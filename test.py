@@ -91,9 +91,24 @@ def main():
             print(f"[RESULT] First failing TXID: {txid}")
             sys.exit(2)
 
-        # 3) Validate exact match {"verification":"Test"}
-        if not (isinstance(resp, dict) and resp.get("verification") == "Test"):
-            print(f"[FAIL] Verification mismatch for {txid}. Got: {resp}", file=sys.stderr)
+        # 3) Validate new response format: {'fee_sats': <int>, 'txid': <str>} and txid must match expected
+        if not isinstance(resp, dict):
+            print(f"[FAIL] Response is not a JSON object for {txid}. Got: {resp}", file=sys.stderr)
+            print(f"[RESULT] First failing TXID: {txid}")
+            sys.exit(3)
+
+        txid_ret = resp.get("txid")
+        fee_ret = resp.get("fee_sats")
+
+        # txid must match exactly (bitcoin txids are lowercase hex in our API)
+        if txid_ret != txid:
+            print(f"[FAIL] txid mismatch. Expected {txid} but got {txid_ret}", file=sys.stderr)
+            print(f"[RESULT] First failing TXID: {txid}")
+            sys.exit(3)
+
+        # fee_sats must be an integer (allow bool check to exclude True/False)
+        if not isinstance(fee_ret, int):
+            print(f"[FAIL] fee_sats is not an integer for {txid}. Got: {fee_ret} ({type(fee_ret)})", file=sys.stderr)
             print(f"[RESULT] First failing TXID: {txid}")
             sys.exit(3)
 
