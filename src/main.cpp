@@ -152,19 +152,21 @@ int main() {
     CROW_ROUTE(app, "/verify").methods("POST"_method)([](const crow::request& req){
         auto body = crow::json::load(req.body);
         if (!body || !body.has("tx_hex")) {
-            return crow::response(400, "Missing tx/spk/amount");
+            return crow::response(400, "Missing tx_hex");
         }
 
         try {
             std::string tx_hex = body["tx_hex"].s();
-            // std::string spk_hex = body["spk"].s();
-            // int64_t amount = body["amount"].i();
-
             std::vector<unsigned char> tx_bytes  = from_hex(tx_hex);
-            // std::vector<unsigned char> spk_bytes = from_hex(spk_hex);
 
             btck_Transaction* tx = btck_transaction_create(tx_bytes.data(), tx_bytes.size());
             if (!tx) return crow::response(400, "tx parse failed");
+
+            const btck_Txid* txid = btck_transaction_get_txid(tx);
+            std::vector<unsigned char> txid_bytes(32, 0);
+            btck_txid_to_bytes(txid, txid_bytes.data());
+            std::string txid_hex = TxidToHexReversed(txid_bytes);
+            printf("Verifying txid: %s\n", txid_hex.c_str());
 
             size_t input_count = btck_transaction_count_inputs(tx);
 
@@ -187,12 +189,12 @@ int main() {
                 const btck_TransactionOutPoint* out_point = btck_transaction_input_get_out_point(input);
 
                 const btck_Txid* out_point_txid = btck_transaction_out_point_get_txid(out_point);
-                
+
                 uint32_t out_point_index = btck_transaction_out_point_get_index(out_point);
 
-                std::vector<unsigned char> txid_bytes(32, 0);
-                btck_txid_to_bytes(out_point_txid, txid_bytes.data());
-                std::string out_point_txid_hex = TxidToHexReversed(txid_bytes);
+                std::vector<unsigned char> out_point_txid_bytes(32, 0);
+                btck_txid_to_bytes(out_point_txid, out_point_txid_bytes.data());
+                std::string out_point_txid_hex = TxidToHexReversed(out_point_txid_bytes);
 
                 printf("txid: %s, n: %u\n", out_point_txid_hex.c_str(), out_point_index);
 

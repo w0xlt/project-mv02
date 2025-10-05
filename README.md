@@ -2,16 +2,19 @@
 
 1. Build and install Bitcoin Core from the PR #30595 head with the kernel lib enabled
 ```
-git clone https://github.com/TheCharlatan/bitcoin.git
-cd bitcoin
-git checkout -b kernelApi_outpoints origin/kernelApi_outpoints
+$ git clone https://github.com/bitcoin/bitcoin.git
+$ cd bitcoin
+$ git fetch origin pull/30595/head:pr_30595
+$ git switch pr_30595
 
-cmake -S . -B build \
+$ cmake -S . -B build \
   -DBUILD_KERNEL_LIB=ON \
   -DBUILD_SHARED_LIBS=OFF \
-  -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF
+  -DBUILD_GUI=OFF \
+  -DBUILD_TESTS=OFF \
+  -DBUILD_BENCH=OFF
 
-cmake --build build -j
+$ cmake --build build -j
 ```
 2. `sudo apt install cmake git ninja`
 3. `git clone https://github.com/w0xlt/mevpool`
