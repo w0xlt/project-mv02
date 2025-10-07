@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(bitcoinkernel_http C CXX)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Bitcoin Core build paths
@@ -22,8 +22,9 @@ find_package(cpr CONFIG REQUIRED)
 
 add_executable(bitcoinkernel_http src/main.cpp)
 
-target_include_directories(bitcoinkernel_http PRIVATE
-  "${BITCOIN_DIR}/src/kernel")
+target_include_directories(bitcoinkernel_http PRIVATE "${BITCOIN_DIR}/src")
+target_link_libraries(bitcoinkernel_http PRIVATE "${BITCOIN_BUILD}/lib/libbitcoinkernel.a")
+target_compile_definitions(bitcoinkernel_http PRIVATE BITCOINKERNEL_STATIC)
 
 find_library(BITCOINKERNEL_LIB NAMES bitcoinkernel
   HINTS "${BITCOIN_BUILD}/lib" NO_DEFAULT_PATH REQUIRED)
