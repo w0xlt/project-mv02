@@ -6,6 +6,8 @@
 #include <cctype>
 #include <stdexcept>
 #include <cstdio>
+#include <sstream>
+#include <iomanip>
 #include "bitcoinkernel.h"
 
 std::string TxidToHexReversed(const std::vector<unsigned char>& txid_bytes)
@@ -16,6 +18,16 @@ std::string TxidToHexReversed(const std::vector<unsigned char>& txid_bytes)
     // iterate in reverse order
     for (auto it = txid_bytes.rbegin(); it != txid_bytes.rend(); ++it) {
         oss << std::setw(2) << static_cast<int>(*it);
+    }
+    return oss.str();
+}
+
+// Helper to convert bytes to hex for debugging
+std::string bytes_to_hex(const std::vector<unsigned char>& bytes) {
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (unsigned char b : bytes) {
+        oss << std::setw(2) << static_cast<int>(b);
     }
     return oss.str();
 }
@@ -145,6 +157,92 @@ static uint64_t btc_to_sats(const nlohmann::json& jnum) {
     return whole * 100000000ULL + frac8;
 }
 
+// Helper to detect if transaction has witness data based on flag
+static bool has_witness_flag(const std::vector<unsigned char>& tx_bytes) {
+    // Check for witness flag (bytes 4-5 should be 0x00 0x01 after version)
+    if (tx_bytes.size() > 6) {
+        return (tx_bytes[4] == 0x00 && tx_bytes[5] == 0x01);
+    }
+    return false;
+}
+
+// Helper to get script type description
+static std::string get_script_type(const std::vector<unsigned char>& script) {
+    if (script.size() == 22 && script[0] == 0x00 && script[1] == 0x14) {
+        return "witness_v0_keyhash (P2WPKH)";
+    } else if (script.size() == 34 && script[0] == 0x00 && script[1] == 0x20) {
+        return "witness_v0_scripthash (P2WSH)";
+    } else if (script.size() == 34 && script[0] == 0x51 && script[1] == 0x20) {
+        return "witness_v1_taproot (P2TR)";
+    } else if (script.size() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87) {
+        return "p2sh";
+    } else if (script.size() == 25 && script[0] == 0x76 && script[1] == 0xa9) {
+        return "p2pkh";
+    } else if (script.size() >= 2 && script[0] <= 0x51) {
+        // Check for other witness versions (v2-v16)
+        int version = -1;
+        if (script[0] == 0x00) version = 0;
+        else if (script[0] >= 0x51 && script[0] <= 0x60) version = script[0] - 0x50;
+
+        if (version >= 0) {
+            return "witness_v" + std::to_string(version) + " (size=" + std::to_string(script.size()) + ")";
+        }
+    }
+    return "unknown (size=" + std::to_string(script.size()) + ", first_bytes=" +
+            (script.size() >= 2 ? bytes_to_hex({script[0], script[1]}) : "N/A") + ")";
+}
+
+// Convert status enum to string for debugging
+static std::string status_to_string(btck_ScriptVerifyStatus status) {
+    // These are common Bitcoin Core script verification error codes
+    // The actual values may differ in bitcoinkernel
+    switch(status) {
+        case 0: return "OK_or_UNKNOWN (0)";
+        case 1: return "EVAL_FALSE";
+        case 2: return "OP_RETURN";
+        case 3: return "SCRIPT_SIZE";
+        case 4: return "PUSH_SIZE";
+        case 5: return "OP_COUNT";
+        case 6: return "STACK_SIZE";
+        case 7: return "SIG_COUNT";
+        case 8: return "PUBKEY_COUNT";
+        case 9: return "VERIFY";
+        case 10: return "EQUALVERIFY";
+        case 11: return "CHECKMULTISIGVERIFY";
+        case 12: return "CHECKSIGVERIFY";
+        case 13: return "NUMEQUALVERIFY";
+        case 14: return "BAD_OPCODE";
+        case 15: return "DISABLED_OPCODE";
+        case 16: return "INVALID_STACK_OPERATION";
+        case 17: return "INVALID_ALTSTACK_OPERATION";
+        case 18: return "UNBALANCED_CONDITIONAL";
+        case 19: return "NEGATIVE_LOCKTIME";
+        case 20: return "UNSATISFIED_LOCKTIME";
+        case 21: return "SIG_HASHTYPE";
+        case 22: return "SIG_DER";
+        case 23: return "MINIMALDATA";
+        case 24: return "SIG_PUSHONLY";
+        case 25: return "SIG_HIGH_S";
+        case 26: return "SIG_NULLDUMMY";
+        case 27: return "PUBKEYTYPE";
+        case 28: return "CLEANSTACK";
+        case 29: return "MINIMALIF";
+        case 30: return "SIG_NULLFAIL";
+        case 31: return "DISCOURAGE_UPGRADABLE_NOPS";
+        case 32: return "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM";
+        case 33: return "WITNESS_PROGRAM_WRONG_LENGTH";
+        case 34: return "WITNESS_PROGRAM_WITNESS_EMPTY";
+        case 35: return "WITNESS_PROGRAM_MISMATCH";
+        case 36: return "WITNESS_MALLEATED";
+        case 37: return "WITNESS_MALLEATED_P2SH";
+        case 38: return "WITNESS_UNEXPECTED";
+        case 39: return "WITNESS_PUBKEYTYPE";
+        case 40: return "CONST_SCRIPTCODE";
+        case 41: return "TAPROOT_WRONG_CONTROL_SIZE";
+        default: return "UNKNOWN_STATUS_" + std::to_string((int)status);
+    }
+}
+
 // Validation result structure
 struct ValidationResult {
     std::string txid;
@@ -161,9 +259,20 @@ public:
         : std::runtime_error(msg), status(s), input_index(idx) {}
 };
 
-// Extracted validation function
+// Extracted validation function with debugging
 static ValidationResult validate_transaction(std::string tx_hex) {
     std::vector<unsigned char> tx_bytes = from_hex(tx_hex);
+
+    // Debug: Check for witness flag
+    bool has_witness = has_witness_flag(tx_bytes);
+    printf("\n=== TRANSACTION DEBUG INFO ===\n");
+    printf("Transaction size: %zu bytes\n", tx_bytes.size());
+    printf("First 12 bytes: ");
+    for (size_t i = 0; i < std::min(size_t(12), tx_bytes.size()); i++) {
+        printf("%02x", tx_bytes[i]);
+    }
+    printf("\n");
+    printf("Has witness flag (0x0001): %s\n", has_witness ? "YES" : "NO");
 
     btck_Transaction* tx = btck_transaction_create(tx_bytes.data(), tx_bytes.size());
     if (!tx) {
@@ -176,9 +285,8 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     std::string txid_hex = TxidToHexReversed(txid_bytes);
     printf("Verifying txid: %s\n", txid_hex.c_str());
 
-    printf("tx_hex txid: %s\n", tx_hex.c_str());
-
     size_t input_count = btck_transaction_count_inputs(tx);
+    printf("Input count: %zu\n", input_count);
 
     // storage for per-input artifacts
     std::vector<btck_ScriptPubkey*>            spks;
@@ -189,25 +297,21 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     outs_c_array.reserve(input_count);
     amounts_sats.reserve(input_count);
 
-    bool ok = true;
-
-    printf("input_count: %lu\n", input_count);
+    printf("\n=== PROCESSING INPUTS ===\n");
 
     for (size_t i = 0; i < input_count; i++) {
-        printf("input_index: %lu\n", i);
+        printf("\n--- Input %zu ---\n", i);
         const btck_TransactionInput* input = btck_transaction_get_input_at(tx, i);
 
         const btck_TransactionOutPoint* out_point = btck_transaction_input_get_out_point(input);
-
         const btck_Txid* out_point_txid = btck_transaction_out_point_get_txid(out_point);
-
         uint32_t out_point_index = btck_transaction_out_point_get_index(out_point);
 
         std::vector<unsigned char> out_point_txid_bytes(32, 0);
         btck_txid_to_bytes(out_point_txid, out_point_txid_bytes.data());
         std::string out_point_txid_hex = TxidToHexReversed(out_point_txid_bytes);
 
-        printf("txid: %s, n: %u\n", out_point_txid_hex.c_str(), out_point_index);
+        printf("Prevout: %s:%u\n", out_point_txid_hex.c_str(), out_point_index);
 
         // Query UTXO set (typically include_mempool=false for pure UTXO set)
         nlohmann::json result = rpc_call_gettxout(out_point_txid_hex, out_point_index, /*include_mempool=*/false);
@@ -220,8 +324,18 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         }
 
         std::string spk_hex = result["scriptPubKey"]["hex"].get<std::string>();
-        printf("input_spk_hex: %s\n", spk_hex.c_str());
         std::vector<unsigned char> spk_bytes = from_hex(spk_hex);
+
+        // Debug: Script type
+        std::string script_type = get_script_type(spk_bytes);
+        printf("ScriptPubKey hex: %s\n", spk_hex.c_str());
+        printf("Script type: %s\n", script_type.c_str());
+
+        // Warning for Taproot
+        if (script_type.find("P2TR") != std::string::npos) {
+            printf("⚠️  WARNING: This is a Taproot output - validation may fail\n");
+        }
+
         btck_ScriptPubkey* spk = btck_script_pubkey_create(spk_bytes.data(), spk_bytes.size());
         if (!spk) {
             // Cleanup before throwing
@@ -232,8 +346,7 @@ static ValidationResult validate_transaction(std::string tx_hex) {
 
         // Parse value in sats (JSON returns BTC)
         uint64_t value_sats = btc_to_sats(result["value"]);
-
-        printf("value_sats: %lu\n", value_sats);
+        printf("Value: %lu sats\n", value_sats);
 
         // Build a TxOut for the prevout
         btck_TransactionOutput* out = btck_transaction_output_create(spk, value_sats);
@@ -249,8 +362,28 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         spks.push_back(spk);
         outs_c_array.push_back(out);   // const view
         amounts_sats.push_back(value_sats);
+    }
 
-        printf("----\n");
+    printf("\n=== VERIFICATION PHASE ===\n");
+
+    // Store script types for debugging
+    std::vector<std::string> script_types;
+    for (size_t i = 0; i < input_count; ++i) {
+        // Get the original scriptPubKey bytes for type detection
+        // We need to retrieve this from the prevout lookup
+        const btck_TransactionInput* input = btck_transaction_get_input_at(tx, i);
+        const btck_TransactionOutPoint* out_point = btck_transaction_input_get_out_point(input);
+        const btck_Txid* out_point_txid = btck_transaction_out_point_get_txid(out_point);
+        uint32_t out_point_index = btck_transaction_out_point_get_index(out_point);
+
+        std::vector<unsigned char> out_point_txid_bytes(32, 0);
+        btck_txid_to_bytes(out_point_txid, out_point_txid_bytes.data());
+        std::string out_point_txid_hex = TxidToHexReversed(out_point_txid_bytes);
+
+        nlohmann::json result = rpc_call_gettxout(out_point_txid_hex, out_point_index, false);
+        std::string spk_hex = result["scriptPubKey"]["hex"].get<std::string>();
+        std::vector<unsigned char> spk_bytes = from_hex(spk_hex);
+        script_types.push_back(get_script_type(spk_bytes));
     }
 
     // === Verification pass: one call per input ===
@@ -261,7 +394,21 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         btck_ScriptVerifyStatus status{};
         unsigned int input_index = static_cast<unsigned int>(i);
 
+        // Debug: Try different flag combinations
         btck_ScriptVerificationFlags flags = btck_ScriptVerificationFlags_ALL;
+
+        printf("\nVerifying input %zu:\n", i);
+        printf("  Amount: %ld sats\n", amount_i);
+        printf("  Script type: %s\n", script_types[i].c_str());
+        printf("  Flags: 0x%x (ALL)\n", flags);
+
+        // Check if this is a Taproot input
+        bool is_taproot = (script_types[i].find("P2TR") != std::string::npos);
+        if (is_taproot) {
+            printf("  WARNING: This is a Taproot (P2TR) input!\n");
+            printf("  Note: Taproot requires specific validation support and flags.\n");
+            printf("  The bitcoinkernel library may not fully support Taproot validation.\n");
+        }
 
         int rc = btck_script_pubkey_verify(
             spk_i,
@@ -275,20 +422,35 @@ static ValidationResult validate_transaction(std::string tx_hex) {
 
         if (rc) {
             // success for this input
-            printf("Input %zu verified\n", i);
+            printf("  Result: SUCCESS\n");
         } else {
+            // Log detailed failure info before cleanup
+            printf("  Result: FAILED\n");
+            printf("  Status code: %d (%s)\n", (int)status, status_to_string(status).c_str());
+            printf("  Transaction has witness: %s\n", has_witness ? "YES" : "NO");
+
+            if (is_taproot) {
+                printf("  LIKELY CAUSE: Taproot validation failure\n");
+                printf("  Taproot (BIP341/BIP342) may require:\n");
+                printf("    - Schnorr signature validation (BIP340)\n");
+                printf("    - Tapscript execution support\n");
+                printf("    - Specific consensus flags for Taproot\n");
+            }
+
             // Cleanup before throwing
             for (auto* s : spks) btck_script_pubkey_destroy(s);
             btck_transaction_destroy(tx);
 
             // Throw exception with status information
-            throw ValidationError(
-                "Input " + std::to_string(i) + " verify failed (status=" + std::to_string((int)status) + ")",
-                status,
-                i
-            );
+            std::string error_msg = "Input " + std::to_string(i) + " verify failed (status=" + status_to_string(status) + ")";
+            if (is_taproot) {
+                error_msg += " [TAPROOT INPUT]";
+            }
+            throw ValidationError(error_msg, status, i);
         }
     }
+
+    printf("\n=== FEE CALCULATION ===\n");
 
     // === Compute fee (sum(inputs) - sum(outputs)) ===
     int64_t sum_inputs_sats = 0;
@@ -305,10 +467,15 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     }
 
     int64_t fee_sats = sum_inputs_sats - sum_outputs_sats;
+    printf("Total inputs: %ld sats\n", sum_inputs_sats);
+    printf("Total outputs: %ld sats\n", sum_outputs_sats);
+    printf("Fee: %ld sats\n", fee_sats);
 
     // === Cleanup ===
     for (auto* s : spks) btck_script_pubkey_destroy(s);
     btck_transaction_destroy(tx);
+
+    printf("\n=== VALIDATION COMPLETE ===\n\n");
 
     return ValidationResult{txid_hex, fee_sats};
 }
@@ -341,7 +508,15 @@ int main() {
             crow::json::wvalue error_res;
             error_res["error"] = e.what();
             error_res["status"] = (int)e.status;
+            error_res["status_name"] = status_to_string(e.status);
             error_res["input_index"] = (int)e.input_index;
+
+            // Check if error message contains TAPROOT indicator
+            if (std::string(e.what()).find("TAPROOT") != std::string::npos) {
+                error_res["is_taproot"] = true;
+                error_res["note"] = "Taproot transactions may not be fully supported by bitcoinkernel";
+            }
+
             return crow::response(400, error_res);
         } catch (const std::exception& e) {
             return crow::response(400, std::string("error: ") + e.what());
