@@ -142,20 +142,12 @@ static std::vector<std::byte> from_hex(const std::string& hex) {
 }
 
 static uint64_t btc_to_sats(const nlohmann::json& jnum) {
-    std::string s = jnum.dump();
-    if (s.find('e') != std::string::npos || s.find('E') != std::string::npos) {
-        long double ld = std::strtold(s.c_str(), nullptr);
-        return (uint64_t) llround(ld * 100000000.0L);
-    }
-    auto dot = s.find('.');
-    std::string intp = (dot == std::string::npos) ? s : s.substr(0, dot);
-    std::string frac = (dot == std::string::npos) ? "" : s.substr(dot + 1);
-    if (intp.empty() || intp == "-") intp = "0";
-    if (frac.size() > 8) frac.resize(8);
-    while (frac.size() < 8) frac.push_back('0');
-    uint64_t whole = std::stoull(intp);
-    uint64_t frac8 = frac.empty() ? 0ULL : std::stoull(frac);
-    return whole * 100000000ULL + frac8;
+    // Get the value directly as a double instead of dumping to string and re-parsing
+    double btc_value = jnum.get<double>();
+    
+    // Multiply by 100,000,000 and use proper rounding
+    // std::round ensures we get the nearest integer, handling floating point errors
+    return static_cast<uint64_t>(std::round(btc_value * 100000000.0));
 }
 
 // Helper to detect if transaction has witness data based on flag
