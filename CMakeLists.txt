@@ -23,14 +23,10 @@ find_package(cpr CONFIG REQUIRED)
 add_executable(bitcoinkernel_http src/main.cpp)
 
 target_include_directories(bitcoinkernel_http PRIVATE "${BITCOIN_DIR}/src")
-target_link_libraries(bitcoinkernel_http PRIVATE "${BITCOIN_BUILD}/lib/libbitcoinkernel.a")
 target_compile_definitions(bitcoinkernel_http PRIVATE BITCOINKERNEL_STATIC)
 
-find_library(BITCOINKERNEL_LIB NAMES bitcoinkernel
-  HINTS "${BITCOIN_BUILD}/lib" NO_DEFAULT_PATH REQUIRED)
-
 target_link_libraries(bitcoinkernel_http PRIVATE
-  "${BITCOINKERNEL_LIB}"
+  "${BITCOIN_BUILD}/lib/libbitcoinkernel.a"
   Crow::Crow
   asio::asio
   nlohmann_json::nlohmann_json
