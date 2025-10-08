@@ -15,6 +15,8 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <future>
+#include <thread>
 #include "kernel/bitcoinkernel_wrapper.h"
 
 // ============================================================================
@@ -162,6 +164,64 @@ private:
 
 // Global script type cache instance
 static ScriptTypeCache g_script_type_cache;
+
+// ============================================================================
+// PARALLEL VERIFICATION CONFIGURATION
+// ============================================================================
+
+struct ParallelVerificationConfig {
+    // Minimum number of inputs to trigger parallel verification
+    // Below this threshold, sequential verification is faster due to thread overhead
+    static constexpr size_t MIN_INPUTS_FOR_PARALLEL = 4;
+    
+    // Maximum number of threads to use for parallel verification
+    // 0 = auto-detect based on hardware concurrency
+    size_t max_threads = 0;
+    
+    bool enabled = true;
+    
+    // Statistics
+    std::atomic<size_t> parallel_validations{0};
+    std::atomic<size_t> sequential_validations{0};
+    std::atomic<size_t> total_inputs_parallel{0};
+    std::atomic<size_t> total_inputs_sequential{0};
+    
+    size_t get_thread_count() const {
+        if (max_threads > 0) {
+            return max_threads;
+        }
+        // Use hardware concurrency, but cap at reasonable limit
+        unsigned int hw_threads = std::thread::hardware_concurrency();
+        return hw_threads > 0 ? std::min(hw_threads, 16u) : 4u;
+    }
+    
+    void print_stats() const {
+        size_t total_validations = parallel_validations + sequential_validations;
+        if (total_validations > 0) {
+            double parallel_pct = (static_cast<double>(parallel_validations) / total_validations) * 100.0;
+            std::ostringstream stats;
+            stats << "Parallel verification stats - "
+                  << "Parallel: " << parallel_validations << " txs (" << total_inputs_parallel << " inputs), "
+                  << "Sequential: " << sequential_validations << " txs (" << total_inputs_sequential << " inputs), "
+                  << "Parallel %: " << std::fixed << std::setprecision(2) << parallel_pct << "%";
+            LOG_INFO(stats.str());
+        }
+    }
+};
+
+// Global parallel verification config
+static ParallelVerificationConfig g_parallel_config;
+
+// Structure to hold the result of a single input verification
+struct InputVerificationResult {
+    size_t input_index;
+    bool success;
+    btck::ScriptVerifyStatus status;
+    std::string error_message;
+    
+    InputVerificationResult(size_t idx, bool ok, btck::ScriptVerifyStatus s, std::string err = "")
+        : input_index(idx), success(ok), status(s), error_message(std::move(err)) {}
+};
 
 // ============================================================================
 // MORE UTILITY FUNCTIONS
@@ -334,7 +394,10 @@ struct InputValidationData {
     {}
 };
 
-// Extracted validation function with Range API for cleaner iteration and cached script type detection
+// Extracted validation function with:
+// - Range API for cleaner iteration
+// - Cached script type detection for performance
+// - Parallel verification for transactions with many inputs (>=4)
 static ValidationResult validate_transaction(std::string tx_hex) {
     std::vector<std::byte> tx_bytes = from_hex(tx_hex);
 
@@ -458,58 +521,160 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         spent_outputs.push_back(btck::TransactionOutput(data.tx_output));
     }
 
-    // Verification pass: one call per input
-    for (size_t i = 0; i < input_count; ++i) {
-        const auto& data = input_data[i];
+    // Decide whether to use parallel or sequential verification
+    bool use_parallel = g_parallel_config.enabled && 
+                       input_count >= ParallelVerificationConfig::MIN_INPUTS_FOR_PARALLEL;
+    
+    if (use_parallel) {
+        g_parallel_config.parallel_validations++;
+        g_parallel_config.total_inputs_parallel += input_count;
         
-        btck::ScriptVerifyStatus status = btck::ScriptVerifyStatus::OK;
-        unsigned int input_index = static_cast<unsigned int>(i);
+        std::ostringstream parallel_info;
+        parallel_info << "Using parallel verification with " << g_parallel_config.get_thread_count() 
+                     << " threads for " << input_count << " inputs";
+        LOG_INFO(parallel_info.str());
+    } else {
+        g_parallel_config.sequential_validations++;
+        g_parallel_config.total_inputs_sequential += input_count;
+    }
 
-        // Use all verification flags
-        btck::ScriptVerificationFlags flags = btck::ScriptVerificationFlags::ALL;
-
-        std::ostringstream verify_header;
-        verify_header << "Verifying input " << i << ":";
-        LOG_DEBUG(verify_header.str());
+    // Verification pass: parallel or sequential based on input count
+    std::vector<InputVerificationResult> verification_results;
+    
+    if (use_parallel) {
+        // Parallel verification using std::async
+        // Each input verification is completely independent and thread-safe
+        // The Transaction and spent_outputs are const and can be safely shared across threads
+        std::vector<std::future<InputVerificationResult>> futures;
+        futures.reserve(input_count);
         
-        std::ostringstream amount_info;
-        amount_info << "  Amount: " << data.amount_sats << " sats";
-        LOG_DEBUG(amount_info.str());
+        // Launch verification tasks
+        for (size_t i = 0; i < input_count; ++i) {
+            futures.push_back(std::async(std::launch::async, [&, i]() -> InputVerificationResult {
+                const auto& data = input_data[i];
+                btck::ScriptVerifyStatus status = btck::ScriptVerifyStatus::OK;
+                
+                // Use all verification flags
+                btck::ScriptVerificationFlags flags = btck::ScriptVerificationFlags::ALL;
+                
+                // Verify this input
+                bool result = data.script_pubkey.Verify(
+                    static_cast<int64_t>(data.amount_sats),
+                    tx,
+                    std::span<const btck::TransactionOutput>(spent_outputs),
+                    static_cast<unsigned int>(i),
+                    flags,
+                    status
+                );
+                
+                if (!result) {
+                    std::ostringstream err;
+                    err << "Input " << i << " verify failed (status=" << status_to_string(status) << ")";
+                    return InputVerificationResult(i, false, status, err.str());
+                }
+                
+                return InputVerificationResult(i, true, status);
+            }));
+        }
         
-        std::ostringstream type_info;
-        type_info << "  Script type: " << data.script_type;
-        LOG_DEBUG(type_info.str());
+        // Collect results
+        for (auto& future : futures) {
+            verification_results.push_back(future.get());
+        }
         
-        std::ostringstream flags_info;
-        flags_info << "  Flags: 0x" << std::hex << static_cast<unsigned int>(flags) << " (ALL)";
-        LOG_DEBUG(flags_info.str());
-
-        // Use wrapper's Verify method with std::span
-        bool result = data.script_pubkey.Verify(
-            static_cast<int64_t>(data.amount_sats),
-            tx,
-            std::span<const btck::TransactionOutput>(spent_outputs),
-            input_index,
-            flags,
-            status
-        );
-
-        if (result) {
-            LOG_DEBUG("  Result: SUCCESS");
-        } else {
-            LOG_ERROR("  Result: FAILED");
+        // Log results in order
+        for (const auto& result : verification_results) {
+            size_t i = result.input_index;
+            const auto& data = input_data[i];
             
-            std::ostringstream error_details;
-            error_details << "  Status code: " << static_cast<int>(status) 
-                         << " (" << status_to_string(status) << ")";
-            LOG_ERROR(error_details.str());
+            std::ostringstream verify_header;
+            verify_header << "Verifying input " << i << ":";
+            LOG_DEBUG(verify_header.str());
             
-            std::ostringstream witness_err;
-            witness_err << "  Transaction has witness: " << (has_witness ? "YES" : "NO");
-            LOG_ERROR(witness_err.str());
+            std::ostringstream amount_info;
+            amount_info << "  Amount: " << data.amount_sats << " sats";
+            LOG_DEBUG(amount_info.str());
+            
+            std::ostringstream type_info;
+            type_info << "  Script type: " << data.script_type;
+            LOG_DEBUG(type_info.str());
+            
+            std::ostringstream flags_info;
+            flags_info << "  Flags: 0x" << std::hex << static_cast<unsigned int>(btck::ScriptVerificationFlags::ALL) << " (ALL)";
+            LOG_DEBUG(flags_info.str());
+            
+            if (result.success) {
+                LOG_DEBUG("  Result: SUCCESS");
+            } else {
+                LOG_ERROR("  Result: FAILED");
+                
+                std::ostringstream error_details;
+                error_details << "  Status code: " << static_cast<int>(result.status) 
+                             << " (" << status_to_string(result.status) << ")";
+                LOG_ERROR(error_details.str());
+                
+                std::ostringstream witness_err;
+                witness_err << "  Transaction has witness: " << (has_witness ? "YES" : "NO");
+                LOG_ERROR(witness_err.str());
+                
+                throw ValidationError(result.error_message, result.status, i);
+            }
+        }
+        
+    } else {
+        // Sequential verification (original logic)
+        for (size_t i = 0; i < input_count; ++i) {
+            const auto& data = input_data[i];
+            
+            btck::ScriptVerifyStatus status = btck::ScriptVerifyStatus::OK;
+            unsigned int input_index = static_cast<unsigned int>(i);
 
-            std::string error_msg = "Input " + std::to_string(i) + " verify failed (status=" + status_to_string(status) + ")";
-            throw ValidationError(error_msg, status, i);
+            // Use all verification flags
+            btck::ScriptVerificationFlags flags = btck::ScriptVerificationFlags::ALL;
+
+            std::ostringstream verify_header;
+            verify_header << "Verifying input " << i << ":";
+            LOG_DEBUG(verify_header.str());
+            
+            std::ostringstream amount_info;
+            amount_info << "  Amount: " << data.amount_sats << " sats";
+            LOG_DEBUG(amount_info.str());
+            
+            std::ostringstream type_info;
+            type_info << "  Script type: " << data.script_type;
+            LOG_DEBUG(type_info.str());
+            
+            std::ostringstream flags_info;
+            flags_info << "  Flags: 0x" << std::hex << static_cast<unsigned int>(flags) << " (ALL)";
+            LOG_DEBUG(flags_info.str());
+
+            // Use wrapper's Verify method with std::span
+            bool result = data.script_pubkey.Verify(
+                static_cast<int64_t>(data.amount_sats),
+                tx,
+                std::span<const btck::TransactionOutput>(spent_outputs),
+                input_index,
+                flags,
+                status
+            );
+
+            if (result) {
+                LOG_DEBUG("  Result: SUCCESS");
+            } else {
+                LOG_ERROR("  Result: FAILED");
+                
+                std::ostringstream error_details;
+                error_details << "  Status code: " << static_cast<int>(status) 
+                             << " (" << status_to_string(status) << ")";
+                LOG_ERROR(error_details.str());
+                
+                std::ostringstream witness_err;
+                witness_err << "  Transaction has witness: " << (has_witness ? "YES" : "NO");
+                LOG_ERROR(witness_err.str());
+
+                std::string error_msg = "Input " + std::to_string(i) + " verify failed (status=" + status_to_string(status) + ")";
+                throw ValidationError(error_msg, status, i);
+            }
         }
     }
 
@@ -582,6 +747,13 @@ int main() {
     // Set up kernel logging - this captures internal validation logs from bitcoinkernel
     // The g_kernel_logger object, by existing, routes all kernel logs through KernelLogHandler
     setup_kernel_logging();
+    
+    // Log parallel verification configuration
+    std::ostringstream parallel_info;
+    parallel_info << "Parallel verification: " << (g_parallel_config.enabled ? "ENABLED" : "DISABLED")
+                  << ", Threshold: " << ParallelVerificationConfig::MIN_INPUTS_FOR_PARALLEL << " inputs"
+                  << ", Threads: " << g_parallel_config.get_thread_count();
+    LOG_INFO(parallel_info.str());
     
     crow::SimpleApp app;
 
@@ -665,14 +837,70 @@ int main() {
         return crow::response(200, res);
     });
 
+    // GET /parallel-stats - returns parallel verification statistics
+    CROW_ROUTE(app, "/parallel-stats").methods("GET"_method)(
+    [](){
+        size_t total_validations = g_parallel_config.parallel_validations + g_parallel_config.sequential_validations;
+        double parallel_pct = 0.0;
+        if (total_validations > 0) {
+            parallel_pct = (static_cast<double>(g_parallel_config.parallel_validations) / total_validations) * 100.0;
+        }
+        
+        crow::json::wvalue stats;
+        stats["enabled"] = g_parallel_config.enabled;
+        stats["min_inputs_threshold"] = ParallelVerificationConfig::MIN_INPUTS_FOR_PARALLEL;
+        stats["max_threads"] = g_parallel_config.max_threads;
+        stats["detected_threads"] = g_parallel_config.get_thread_count();
+        stats["parallel_validations"] = g_parallel_config.parallel_validations.load();
+        stats["sequential_validations"] = g_parallel_config.sequential_validations.load();
+        stats["total_validations"] = total_validations;
+        stats["parallel_percent"] = parallel_pct;
+        stats["total_inputs_parallel"] = g_parallel_config.total_inputs_parallel.load();
+        stats["total_inputs_sequential"] = g_parallel_config.total_inputs_sequential.load();
+        
+        return crow::response(200, stats);
+    });
+
+    // POST /parallel-config - configure parallel verification
+    CROW_ROUTE(app, "/parallel-config").methods("POST"_method)(
+    [](const crow::request& req){
+        auto body = crow::json::load(req.body);
+        if (!body) {
+            return crow::response(400, "Invalid JSON");
+        }
+        
+        if (body.has("enabled")) {
+            g_parallel_config.enabled = body["enabled"].b();
+        }
+        
+        if (body.has("max_threads")) {
+            int threads = body["max_threads"].i();
+            if (threads < 0 || threads > 64) {
+                return crow::response(400, "max_threads must be between 0 and 64");
+            }
+            g_parallel_config.max_threads = static_cast<size_t>(threads);
+        }
+        
+        crow::json::wvalue res;
+        res["message"] = "Parallel verification configuration updated";
+        res["enabled"] = g_parallel_config.enabled;
+        res["max_threads"] = g_parallel_config.max_threads;
+        res["detected_threads"] = g_parallel_config.get_thread_count();
+        
+        LOG_INFO("Parallel verification config updated");
+        
+        return crow::response(200, res);
+    });
+
     register_routes(app);
 
     LOG_INFO("Starting HTTP server on port 8080");
     app.port(8080).multithreaded().run();
     
-    // Print cache statistics before shutdown
+    // Print statistics before shutdown
     LOG_INFO("Server stopped, printing final statistics:");
     g_script_type_cache.print_stats();
+    g_parallel_config.print_stats();
     
     // Clean up kernel logger before exit to prevent shutdown assertion failures
     LOG_INFO("Shutting down...");
