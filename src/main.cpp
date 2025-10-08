@@ -263,7 +263,7 @@ struct InputValidationData {
     {}
 };
 
-// Extracted validation function with logging
+// Extracted validation function with Range API for cleaner iteration
 static ValidationResult validate_transaction(std::string tx_hex) {
     std::vector<std::byte> tx_bytes = from_hex(tx_hex);
 
@@ -300,6 +300,7 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     txid_info << "Verifying txid: " << txid_hex;
     LOG_INFO(txid_info.str());
 
+    // Count inputs for informational logging
     size_t input_count = tx.CountInputs();
     std::ostringstream input_info;
     input_info << "Input count: " << input_count;
@@ -307,17 +308,17 @@ static ValidationResult validate_transaction(std::string tx_hex) {
 
     // Storage for per-input validation data - single pass collection
     std::vector<InputValidationData> input_data;
-    input_data.reserve(input_count);
 
     LOG_INFO("=== PROCESSING INPUTS ===");
 
-    // Collect all input data in one pass
-    for (size_t i = 0; i < input_count; i++) {
+    // Collect all input data in one pass using Range API
+    // tx.Inputs() returns a range that can be iterated with range-based for loops
+    size_t input_index = 0;
+    for (const auto& input_view : tx.Inputs()) {
         std::ostringstream input_header;
-        input_header << "--- Input " << i << " ---";
+        input_header << "--- Input " << input_index << " ---";
         LOG_DEBUG(input_header.str());
         
-        auto input_view = tx.GetInput(i);
         auto out_point_view = input_view.OutPoint();
         auto out_point_txid_view = out_point_view.Txid();
         uint32_t out_point_index = out_point_view.index();
@@ -372,6 +373,8 @@ static ValidationResult validate_transaction(std::string tx_hex) {
             std::move(spk),
             std::move(tx_out)
         );
+        
+        input_index++;
     }
 
     LOG_INFO("=== VERIFICATION PHASE ===");
@@ -446,11 +449,11 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         sum_inputs_sats += static_cast<int64_t>(data.amount_sats);
     }
 
+    // Use Range API for cleaner output iteration
+    // tx.Outputs() provides a modern C++ range-based interface
     int64_t sum_outputs_sats = 0;
-    size_t output_count = tx.CountOutputs();
-    for (size_t i = 0; i < output_count; ++i) {
-        auto out_view = tx.GetOutput(i);
-        sum_outputs_sats += out_view.Amount();
+    for (const auto& output : tx.Outputs()) {
+        sum_outputs_sats += output.Amount();
     }
 
     int64_t fee_sats = sum_inputs_sats - sum_outputs_sats;
@@ -561,9 +564,10 @@ int main() {
 
     LOG_INFO("Starting HTTP server on port 8080");
     app.port(8080).multithreaded().run();
-
+    
+    // Clean up kernel logger before exit to prevent shutdown assertion failures
     LOG_INFO("Shutting down...");
     g_kernel_logger.reset();
-
+    
     return 0;
 }
