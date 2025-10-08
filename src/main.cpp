@@ -284,11 +284,6 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         printf("ScriptPubKey hex: %s\n", spk_hex.c_str());
         printf("Script type: %s\n", script_type.c_str());
 
-        // Warning for Taproot
-        if (script_type.find("P2TR") != std::string::npos) {
-            printf("⚠️  WARNING: This is a Taproot output - validation may fail\n");
-        }
-
         // Create ScriptPubkey using wrapper - RAII handles memory
         btck::ScriptPubkey spk(spk_bytes);
 
@@ -340,14 +335,6 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         printf("  Script type: %s\n", script_types[i].c_str());
         printf("  Flags: 0x%x (ALL)\n", static_cast<unsigned int>(flags));
 
-        // Check if this is a Taproot input
-        bool is_taproot = (script_types[i].find("P2TR") != std::string::npos);
-        if (is_taproot) {
-            printf("  WARNING: This is a Taproot (P2TR) input!\n");
-            printf("  Note: Taproot requires specific validation support and flags.\n");
-            printf("  The bitcoinkernel library may not fully support Taproot validation.\n");
-        }
-
         // Use wrapper's Verify method - takes std::span
         bool result = spk_i.Verify(
             amount_i,
@@ -367,19 +354,8 @@ static ValidationResult validate_transaction(std::string tx_hex) {
             printf("  Status code: %d (%s)\n", static_cast<int>(status), status_to_string(status).c_str());
             printf("  Transaction has witness: %s\n", has_witness ? "YES" : "NO");
 
-            if (is_taproot) {
-                printf("  LIKELY CAUSE: Taproot validation failure\n");
-                printf("  Taproot (BIP341/BIP342) may require:\n");
-                printf("    - Schnorr signature validation (BIP340)\n");
-                printf("    - Tapscript execution support\n");
-                printf("    - Specific consensus flags for Taproot\n");
-            }
-
             // Throw exception with status information
             std::string error_msg = "Input " + std::to_string(i) + " verify failed (status=" + status_to_string(status) + ")";
-            if (is_taproot) {
-                error_msg += " [TAPROOT INPUT]";
-            }
             throw ValidationError(error_msg, status, i);
         }
     }
@@ -441,12 +417,6 @@ int main() {
             error_res["status"] = static_cast<int>(e.status);
             error_res["status_name"] = status_to_string(e.status);
             error_res["input_index"] = static_cast<int>(e.input_index);
-
-            // Check if error message contains TAPROOT indicator
-            if (std::string(e.what()).find("TAPROOT") != std::string::npos) {
-                error_res["is_taproot"] = true;
-                error_res["note"] = "Taproot transactions may not be fully supported by bitcoinkernel";
-            }
 
             return crow::response(400, error_res);
         } catch (const std::exception& e) {
