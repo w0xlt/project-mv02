@@ -9,7 +9,44 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
+#include <iostream>
+#include <memory>
+#include <ctime>
 #include "kernel/bitcoinkernel_wrapper.h"
+
+// ============================================================================
+// LOGGING INFRASTRUCTURE
+// ============================================================================
+
+// Simple timestamp helper
+static std::string get_timestamp() {
+    auto now = std::time(nullptr);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    return std::string(buf);
+}
+
+// Simple logging macros using cout - kernel does the heavy lifting
+#define LOG_DEBUG(msg) std::cout << "[" << get_timestamp() << "] [DEBUG] " << msg << std::endl
+#define LOG_INFO(msg)  std::cout << "[" << get_timestamp() << "] [INFO]  " << msg << std::endl
+#define LOG_WARN(msg)  std::cout << "[" << get_timestamp() << "] [WARN]  " << msg << std::endl
+#define LOG_ERROR(msg) std::cerr << "[" << get_timestamp() << "] [ERROR] " << msg << std::endl
+
+// Kernel log handler - captures bitcoinkernel internal logs
+class KernelLogHandler {
+public:
+    void LogMessage(std::string_view message) {
+        // Kernel messages already include category, level, and formatting
+        std::cout << message;  // No newline - kernel includes it
+    }
+};
+
+// Global kernel logger - by existing, it captures all kernel internal logs
+static std::unique_ptr<btck::Logger<KernelLogHandler>> g_kernel_logger;
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
 
 // Helper to convert bytes to hex (for txid display - reversed)
 std::string TxidToHexReversed(const std::array<std::byte, 32>& txid_bytes)
@@ -226,20 +263,30 @@ struct InputValidationData {
     {}
 };
 
-// Extracted validation function with optimization
+// Extracted validation function with logging
 static ValidationResult validate_transaction(std::string tx_hex) {
     std::vector<std::byte> tx_bytes = from_hex(tx_hex);
 
     // Debug: Check for witness flag
     bool has_witness = has_witness_flag(tx_bytes);
-    printf("\n=== TRANSACTION DEBUG INFO ===\n");
-    printf("Transaction size: %zu bytes\n", tx_bytes.size());
-    printf("First 12 bytes: ");
+    
+    LOG_INFO("=== TRANSACTION DEBUG INFO ===");
+    
+    std::ostringstream info;
+    info << "Transaction size: " << tx_bytes.size() << " bytes";
+    LOG_INFO(info.str());
+    
+    std::ostringstream first_bytes;
+    first_bytes << "First 12 bytes: ";
     for (size_t i = 0; i < std::min(size_t(12), tx_bytes.size()); i++) {
-        printf("%02x", static_cast<unsigned char>(tx_bytes[i]));
+        first_bytes << std::hex << std::setfill('0') << std::setw(2) 
+                    << static_cast<int>(static_cast<unsigned char>(tx_bytes[i]));
     }
-    printf("\n");
-    printf("Has witness flag (0x0001): %s\n", has_witness ? "YES" : "NO");
+    LOG_DEBUG(first_bytes.str());
+    
+    std::ostringstream witness_info;
+    witness_info << "Has witness flag (0x0001): " << (has_witness ? "YES" : "NO");
+    LOG_DEBUG(witness_info.str());
 
     // Use btck::Transaction wrapper
     btck::Transaction tx(tx_bytes);
@@ -248,20 +295,27 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     auto txid_view = tx.Txid();
     auto txid_bytes = txid_view.ToBytes();
     std::string txid_hex = TxidToHexReversed(txid_bytes);
-    printf("Verifying txid: %s\n", txid_hex.c_str());
+    
+    std::ostringstream txid_info;
+    txid_info << "Verifying txid: " << txid_hex;
+    LOG_INFO(txid_info.str());
 
     size_t input_count = tx.CountInputs();
-    printf("Input count: %zu\n", input_count);
+    std::ostringstream input_info;
+    input_info << "Input count: " << input_count;
+    LOG_INFO(input_info.str());
 
     // Storage for per-input validation data - single pass collection
     std::vector<InputValidationData> input_data;
     input_data.reserve(input_count);
 
-    printf("\n=== PROCESSING INPUTS ===\n");
+    LOG_INFO("=== PROCESSING INPUTS ===");
 
     // Collect all input data in one pass
     for (size_t i = 0; i < input_count; i++) {
-        printf("\n--- Input %zu ---\n", i);
+        std::ostringstream input_header;
+        input_header << "--- Input " << i << " ---";
+        LOG_DEBUG(input_header.str());
         
         auto input_view = tx.GetInput(i);
         auto out_point_view = input_view.OutPoint();
@@ -271,7 +325,9 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         auto out_point_txid_bytes = out_point_txid_view.ToBytes();
         std::string out_point_txid_hex = TxidToHexReversed(out_point_txid_bytes);
 
-        printf("Prevout: %s:%u\n", out_point_txid_hex.c_str(), out_point_index);
+        std::ostringstream prevout_info;
+        prevout_info << "Prevout: " << out_point_txid_hex << ":" << out_point_index;
+        LOG_DEBUG(prevout_info.str());
 
         // Query UTXO set
         nlohmann::json result = rpc_call_gettxout(out_point_txid_hex, out_point_index, false);
@@ -285,15 +341,24 @@ static ValidationResult validate_transaction(std::string tx_hex) {
 
         // Determine script type once
         std::string script_type = get_script_type(spk_bytes);
-        printf("ScriptPubKey hex: %s\n", spk_hex.c_str());
-        printf("Script type: %s\n", script_type.c_str());
+        
+        std::ostringstream spk_info;
+        spk_info << "ScriptPubKey hex: " << spk_hex;
+        LOG_DEBUG(spk_info.str());
+        
+        std::ostringstream type_info;
+        type_info << "Script type: " << script_type;
+        LOG_DEBUG(type_info.str());
 
         // Create ScriptPubkey using wrapper
         btck::ScriptPubkey spk(spk_bytes);
 
         // Parse value in sats
         uint64_t value_sats = btc_to_sats(result["value"]);
-        printf("Value: %lu sats\n", value_sats);
+        
+        std::ostringstream value_info;
+        value_info << "Value: " << value_sats << " sats";
+        LOG_DEBUG(value_info.str());
 
         // Create TransactionOutput using wrapper
         btck::TransactionOutput tx_out(spk, static_cast<int64_t>(value_sats));
@@ -309,7 +374,7 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         );
     }
 
-    printf("\n=== VERIFICATION PHASE ===\n");
+    LOG_INFO("=== VERIFICATION PHASE ===");
 
     // Build spent_outputs vector from collected data
     std::vector<btck::TransactionOutput> spent_outputs;
@@ -328,10 +393,21 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         // Use all verification flags
         btck::ScriptVerificationFlags flags = btck::ScriptVerificationFlags::ALL;
 
-        printf("\nVerifying input %zu:\n", i);
-        printf("  Amount: %lu sats\n", data.amount_sats);
-        printf("  Script type: %s\n", data.script_type.c_str());
-        printf("  Flags: 0x%x (ALL)\n", static_cast<unsigned int>(flags));
+        std::ostringstream verify_header;
+        verify_header << "Verifying input " << i << ":";
+        LOG_DEBUG(verify_header.str());
+        
+        std::ostringstream amount_info;
+        amount_info << "  Amount: " << data.amount_sats << " sats";
+        LOG_DEBUG(amount_info.str());
+        
+        std::ostringstream type_info;
+        type_info << "  Script type: " << data.script_type;
+        LOG_DEBUG(type_info.str());
+        
+        std::ostringstream flags_info;
+        flags_info << "  Flags: 0x" << std::hex << static_cast<unsigned int>(flags) << " (ALL)";
+        LOG_DEBUG(flags_info.str());
 
         // Use wrapper's Verify method with std::span
         bool result = data.script_pubkey.Verify(
@@ -344,18 +420,25 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         );
 
         if (result) {
-            printf("  Result: SUCCESS\n");
+            LOG_DEBUG("  Result: SUCCESS");
         } else {
-            printf("  Result: FAILED\n");
-            printf("  Status code: %d (%s)\n", static_cast<int>(status), status_to_string(status).c_str());
-            printf("  Transaction has witness: %s\n", has_witness ? "YES" : "NO");
+            LOG_ERROR("  Result: FAILED");
+            
+            std::ostringstream error_details;
+            error_details << "  Status code: " << static_cast<int>(status) 
+                         << " (" << status_to_string(status) << ")";
+            LOG_ERROR(error_details.str());
+            
+            std::ostringstream witness_err;
+            witness_err << "  Transaction has witness: " << (has_witness ? "YES" : "NO");
+            LOG_ERROR(witness_err.str());
 
             std::string error_msg = "Input " + std::to_string(i) + " verify failed (status=" + status_to_string(status) + ")";
             throw ValidationError(error_msg, status, i);
         }
     }
 
-    printf("\n=== FEE CALCULATION ===\n");
+    LOG_INFO("=== FEE CALCULATION ===");
 
     // Compute fee (sum(inputs) - sum(outputs))
     int64_t sum_inputs_sats = 0;
@@ -371,27 +454,73 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     }
 
     int64_t fee_sats = sum_inputs_sats - sum_outputs_sats;
-    printf("Total inputs: %ld sats\n", sum_inputs_sats);
-    printf("Total outputs: %ld sats\n", sum_outputs_sats);
-    printf("Fee: %ld sats\n", fee_sats);
+    
+    std::ostringstream fee_info;
+    fee_info << "Total inputs: " << sum_inputs_sats << " sats";
+    LOG_INFO(fee_info.str());
+    
+    std::ostringstream out_info;
+    out_info << "Total outputs: " << sum_outputs_sats << " sats";
+    LOG_INFO(out_info.str());
+    
+    std::ostringstream final_fee;
+    final_fee << "Fee: " << fee_sats << " sats";
+    LOG_INFO(final_fee.str());
 
-    printf("\n=== VALIDATION COMPLETE ===\n\n");
+    LOG_INFO("=== VALIDATION COMPLETE ===\n");
 
     return ValidationResult{txid_hex, fee_sats};
 }
 
+void setup_kernel_logging() {
+    // Enable kernel logging categories we're interested in
+    btck::logging_enable_category(btck::LogCategory::VALIDATION);
+    btck::logging_enable_category(btck::LogCategory::KERNEL);
+    
+    // Set log level - you can adjust this to control verbosity
+    // Available levels: TRACE_LEVEL, DEBUG_LEVEL, INFO_LEVEL
+    btck::logging_set_level_category(btck::LogCategory::ALL, btck::LogLevel::DEBUG_LEVEL);
+    
+    // Create logging options
+    btck_LoggingOptions log_opts = {
+        .log_timestamps = 1,                   // Include timestamps
+        .log_time_micros = 0,                  // Don't need microsecond precision
+        .log_threadnames = 0,                  // Don't need thread names for now
+        .log_sourcelocations = 0,              // Don't need source locations
+        .always_print_category_levels = 1      // Always show category and level
+    };
+    
+    // Create the kernel logger - by existing, it captures all kernel logs
+    auto handler = std::make_unique<KernelLogHandler>();
+    g_kernel_logger = std::make_unique<btck::Logger<KernelLogHandler>>(
+        std::move(handler), 
+        log_opts
+    );
+    
+    LOG_INFO("Bitcoinkernel logging initialized");
+}
+
 int main() {
+    // Initialize logging
+    LOG_INFO("Starting Bitcoin Transaction Validator");
+    
+    // Set up kernel logging - this captures internal validation logs from bitcoinkernel
+    // The g_kernel_logger object, by existing, routes all kernel logs through KernelLogHandler
+    setup_kernel_logging();
+    
     crow::SimpleApp app;
 
     // POST /verify with JSON: { "tx_hex": "...hex..." }
     CROW_ROUTE(app, "/verify").methods("POST"_method)([](const crow::request& req){
         auto body = crow::json::load(req.body);
         if (!body || !body.has("tx_hex")) {
+            LOG_WARN("Received request without tx_hex");
             return crow::response(400, "Missing tx_hex");
         }
 
         try {
             std::string tx_hex = body["tx_hex"].s();
+            LOG_INFO("Received validation request for transaction");
 
             // Call the validation function
             ValidationResult result = validate_transaction(tx_hex);
@@ -401,9 +530,17 @@ int main() {
             res["txid"] = result.txid;
             res["fee_sats"] = result.fee_sats;
 
+            std::ostringstream success_msg;
+            success_msg << "Validation successful for txid: " << result.txid;
+            LOG_INFO(success_msg.str());
+            
             return crow::response(200, res);
 
         } catch (const ValidationError& e) {
+            std::ostringstream err_msg;
+            err_msg << "Validation error: " << e.what();
+            LOG_ERROR(err_msg.str());
+            
             // Return validation error with status information
             crow::json::wvalue error_res;
             error_res["error"] = e.what();
@@ -413,11 +550,20 @@ int main() {
 
             return crow::response(400, error_res);
         } catch (const std::exception& e) {
+            std::ostringstream err_msg;
+            err_msg << "Exception during validation: " << e.what();
+            LOG_ERROR(err_msg.str());
             return crow::response(400, std::string("error: ") + e.what());
         }
     });
 
     register_routes(app);
 
+    LOG_INFO("Starting HTTP server on port 8080");
     app.port(8080).multithreaded().run();
+
+    LOG_INFO("Shutting down...");
+    g_kernel_logger.reset();
+
+    return 0;
 }
