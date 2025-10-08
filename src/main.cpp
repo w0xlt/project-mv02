@@ -12,6 +12,9 @@
 #include <iostream>
 #include <memory>
 #include <ctime>
+#include <unordered_map>
+#include <mutex>
+#include <atomic>
 #include "kernel/bitcoinkernel_wrapper.h"
 
 // ============================================================================
@@ -68,6 +71,101 @@ std::string bytes_to_hex(const std::vector<std::byte>& bytes) {
     }
     return oss.str();
 }
+
+// ============================================================================
+// SCRIPT TYPE CACHE
+// ============================================================================
+
+// Cache for script type detection to avoid redundant pattern matching
+struct ScriptTypeCache {
+    std::unordered_map<std::string, std::string> cache;
+    mutable std::mutex mutex;
+    size_t hits = 0;
+    size_t misses = 0;
+    static constexpr size_t MAX_CACHE_SIZE = 10000;
+    
+    std::string get_or_compute(const std::string& spk_hex, const std::vector<std::byte>& script) {
+        std::lock_guard<std::mutex> lock(mutex);
+        
+        // Check cache first
+        auto it = cache.find(spk_hex);
+        if (it != cache.end()) {
+            hits++;
+            return it->second;
+        }
+        
+        // Cache miss - compute the script type
+        misses++;
+        std::string script_type = compute_script_type(script);
+        
+        // Add to cache if not full
+        if (cache.size() < MAX_CACHE_SIZE) {
+            cache[spk_hex] = script_type;
+        } else {
+            // Cache is full - could implement LRU here, but for now just skip
+            LOG_DEBUG("Script type cache full, skipping cache insertion");
+        }
+        
+        return script_type;
+    }
+    
+    void print_stats() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        size_t total = hits + misses;
+        if (total > 0) {
+            double hit_rate = (static_cast<double>(hits) / total) * 100.0;
+            std::ostringstream stats;
+            stats << "Script type cache stats - Hits: " << hits 
+                  << ", Misses: " << misses 
+                  << ", Hit rate: " << std::fixed << std::setprecision(2) << hit_rate 
+                  << "%, Size: " << cache.size();
+            LOG_INFO(stats.str());
+        }
+    }
+    
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex);
+        cache.clear();
+        hits = 0;
+        misses = 0;
+        LOG_INFO("Script type cache cleared");
+    }
+    
+private:
+    // Actual script type detection logic (moved from get_script_type)
+    static std::string compute_script_type(const std::vector<std::byte>& script) {
+        if (script.size() == 22 && script[0] == std::byte{0x00} && script[1] == std::byte{0x14}) {
+            return "witness_v0_keyhash (P2WPKH)";
+        } else if (script.size() == 34 && script[0] == std::byte{0x00} && script[1] == std::byte{0x20}) {
+            return "witness_v0_scripthash (P2WSH)";
+        } else if (script.size() == 34 && script[0] == std::byte{0x51} && script[1] == std::byte{0x20}) {
+            return "witness_v1_taproot (P2TR)";
+        } else if (script.size() == 23 && script[0] == std::byte{0xa9} && script[1] == std::byte{0x14} && script[22] == std::byte{0x87}) {
+            return "p2sh";
+        } else if (script.size() == 25 && script[0] == std::byte{0x76} && script[1] == std::byte{0xa9}) {
+            return "p2pkh";
+        } else if (script.size() >= 2 && script[0] <= std::byte{0x51}) {
+            int version = -1;
+            if (script[0] == std::byte{0x00}) version = 0;
+            else if (script[0] >= std::byte{0x51} && script[0] <= std::byte{0x60}) {
+                version = static_cast<int>(script[0]) - 0x50;
+            }
+
+            if (version >= 0) {
+                return "witness_v" + std::to_string(version) + " (size=" + std::to_string(script.size()) + ")";
+            }
+        }
+        return "unknown (size=" + std::to_string(script.size()) + ", first_bytes=" +
+                (script.size() >= 2 ? bytes_to_hex({script[0], script[1]}) : "N/A") + ")";
+    }
+};
+
+// Global script type cache instance
+static ScriptTypeCache g_script_type_cache;
+
+// ============================================================================
+// MORE UTILITY FUNCTIONS
+// ============================================================================
 
 // Read ~/.bitcoin/.cookie -> "user:token"
 static std::string read_cookie() {
@@ -186,33 +284,6 @@ static bool has_witness_flag(const std::vector<std::byte>& tx_bytes) {
     return false;
 }
 
-// Helper to get script type description
-static std::string get_script_type(const std::vector<std::byte>& script) {
-    if (script.size() == 22 && script[0] == std::byte{0x00} && script[1] == std::byte{0x14}) {
-        return "witness_v0_keyhash (P2WPKH)";
-    } else if (script.size() == 34 && script[0] == std::byte{0x00} && script[1] == std::byte{0x20}) {
-        return "witness_v0_scripthash (P2WSH)";
-    } else if (script.size() == 34 && script[0] == std::byte{0x51} && script[1] == std::byte{0x20}) {
-        return "witness_v1_taproot (P2TR)";
-    } else if (script.size() == 23 && script[0] == std::byte{0xa9} && script[1] == std::byte{0x14} && script[22] == std::byte{0x87}) {
-        return "p2sh";
-    } else if (script.size() == 25 && script[0] == std::byte{0x76} && script[1] == std::byte{0xa9}) {
-        return "p2pkh";
-    } else if (script.size() >= 2 && script[0] <= std::byte{0x51}) {
-        int version = -1;
-        if (script[0] == std::byte{0x00}) version = 0;
-        else if (script[0] >= std::byte{0x51} && script[0] <= std::byte{0x60}) {
-            version = static_cast<int>(script[0]) - 0x50;
-        }
-
-        if (version >= 0) {
-            return "witness_v" + std::to_string(version) + " (size=" + std::to_string(script.size()) + ")";
-        }
-    }
-    return "unknown (size=" + std::to_string(script.size()) + ", first_bytes=" +
-            (script.size() >= 2 ? bytes_to_hex({script[0], script[1]}) : "N/A") + ")";
-}
-
 // Convert status enum to string for debugging
 static std::string status_to_string(btck::ScriptVerifyStatus status) {
     switch(status) {
@@ -263,7 +334,7 @@ struct InputValidationData {
     {}
 };
 
-// Extracted validation function with Range API for cleaner iteration
+// Extracted validation function with Range API for cleaner iteration and cached script type detection
 static ValidationResult validate_transaction(std::string tx_hex) {
     std::vector<std::byte> tx_bytes = from_hex(tx_hex);
 
@@ -340,8 +411,9 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         std::string spk_hex = result["scriptPubKey"]["hex"].get<std::string>();
         std::vector<std::byte> spk_bytes = from_hex(spk_hex);
 
-        // Determine script type once
-        std::string script_type = get_script_type(spk_bytes);
+        // Determine script type using cache - avoids redundant pattern matching
+        // Common script types (P2WPKH, P2WSH, etc.) are cached for performance
+        std::string script_type = g_script_type_cache.get_or_compute(spk_hex, spk_bytes);
         
         std::ostringstream spk_info;
         spk_info << "ScriptPubKey hex: " << spk_hex;
@@ -560,10 +632,47 @@ int main() {
         }
     });
 
+    // GET /cache-stats - returns script type cache statistics
+    CROW_ROUTE(app, "/cache-stats").methods("GET"_method)(
+    [](){
+        std::lock_guard<std::mutex> lock(g_script_type_cache.mutex);
+        
+        size_t total = g_script_type_cache.hits + g_script_type_cache.misses;
+        double hit_rate = 0.0;
+        if (total > 0) {
+            hit_rate = (static_cast<double>(g_script_type_cache.hits) / total) * 100.0;
+        }
+        
+        crow::json::wvalue stats;
+        stats["cache_hits"] = g_script_type_cache.hits;
+        stats["cache_misses"] = g_script_type_cache.misses;
+        stats["total_lookups"] = total;
+        stats["hit_rate_percent"] = hit_rate;
+        stats["cache_size"] = g_script_type_cache.cache.size();
+        stats["cache_max_size"] = ScriptTypeCache::MAX_CACHE_SIZE;
+        
+        return crow::response(200, stats);
+    });
+
+    // POST /cache-clear - clears the script type cache
+    CROW_ROUTE(app, "/cache-clear").methods("POST"_method)(
+    [](){
+        g_script_type_cache.clear();
+        
+        crow::json::wvalue res;
+        res["message"] = "Script type cache cleared successfully";
+        
+        return crow::response(200, res);
+    });
+
     register_routes(app);
 
     LOG_INFO("Starting HTTP server on port 8080");
     app.port(8080).multithreaded().run();
+    
+    // Print cache statistics before shutdown
+    LOG_INFO("Server stopped, printing final statistics:");
+    g_script_type_cache.print_stats();
     
     // Clean up kernel logger before exit to prevent shutdown assertion failures
     LOG_INFO("Shutting down...");
