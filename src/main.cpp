@@ -16,7 +16,6 @@ std::string TxidToHexReversed(const std::array<std::byte, 32>& txid_bytes)
 {
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
-    // iterate in reverse order
     for (auto it = txid_bytes.rbegin(); it != txid_bytes.rend(); ++it) {
         oss << std::setw(2) << static_cast<int>(static_cast<unsigned char>(*it));
     }
@@ -53,7 +52,6 @@ static std::pair<std::string, std::string> split_userpass(const std::string& up)
 
 static nlohmann::json rpc_call_gettxout(const std::string& txid, int vout, bool include_mempool,
     const std::string& rpc_url = "http://127.0.0.1:8332/") {
-    // JSON-RPC body
     nlohmann::json body = {
         {"jsonrpc","1.0"},
         {"id","crow"},
@@ -62,10 +60,8 @@ static nlohmann::json rpc_call_gettxout(const std::string& txid, int vout, bool 
     };
     std::string body_str = body.dump();
 
-    // Basic Auth from cookie
     auto up = split_userpass(read_cookie());
 
-    // CPR POST
     auto res = cpr::Post(
         cpr::Url{rpc_url},
         cpr::Header{{"Content-Type","application/json"}},
@@ -84,14 +80,13 @@ static nlohmann::json rpc_call_gettxout(const std::string& txid, int vout, bool 
 
     auto j = nlohmann::json::parse(res.text);
     if (!j.contains("error") || j["error"].is_null()) {
-        return j["result"]; // may be null if spent
+        return j["result"];
     } else {
         throw std::runtime_error("RPC error: " + j["error"].dump());
     }
 }
 
 // --- Crow route ---
-// POST /gettxout {"txid":"<hex>", "vout":0, "include_mempool":true}
 static void register_routes(crow::SimpleApp& app) {
     CROW_ROUTE(app, "/gettxout").methods("POST"_method)(
     [](const crow::request& req){
@@ -142,17 +137,12 @@ static std::vector<std::byte> from_hex(const std::string& hex) {
 }
 
 static uint64_t btc_to_sats(const nlohmann::json& jnum) {
-    // Get the value directly as a double instead of dumping to string and re-parsing
     double btc_value = jnum.get<double>();
-    
-    // Multiply by 100,000,000 and use proper rounding
-    // std::round ensures we get the nearest integer, handling floating point errors
     return static_cast<uint64_t>(std::round(btc_value * 100000000.0));
 }
 
 // Helper to detect if transaction has witness data based on flag
 static bool has_witness_flag(const std::vector<std::byte>& tx_bytes) {
-    // Check for witness flag (bytes 4-5 should be 0x00 0x01 after version)
     if (tx_bytes.size() > 6) {
         return (tx_bytes[4] == std::byte{0x00} && tx_bytes[5] == std::byte{0x01});
     }
@@ -172,7 +162,6 @@ static std::string get_script_type(const std::vector<std::byte>& script) {
     } else if (script.size() == 25 && script[0] == std::byte{0x76} && script[1] == std::byte{0xa9}) {
         return "p2pkh";
     } else if (script.size() >= 2 && script[0] <= std::byte{0x51}) {
-        // Check for other witness versions (v2-v16)
         int version = -1;
         if (script[0] == std::byte{0x00}) version = 0;
         else if (script[0] >= std::byte{0x51} && script[0] <= std::byte{0x60}) {
@@ -217,7 +206,27 @@ public:
         : std::runtime_error(msg), status(s), input_index(idx) {}
 };
 
-// Extracted validation function with debugging
+// Structure to hold per-input validation data
+struct InputValidationData {
+    std::string prevout_txid;
+    uint32_t prevout_index;
+    std::string script_type;
+    uint64_t amount_sats;
+    btck::ScriptPubkey script_pubkey;
+    btck::TransactionOutput tx_output;
+
+    InputValidationData(std::string txid, uint32_t idx, std::string type, 
+                       uint64_t amt, btck::ScriptPubkey spk, btck::TransactionOutput out)
+        : prevout_txid(std::move(txid))
+        , prevout_index(idx)
+        , script_type(std::move(type))
+        , amount_sats(amt)
+        , script_pubkey(std::move(spk))
+        , tx_output(std::move(out))
+    {}
+};
+
+// Extracted validation function with optimization
 static ValidationResult validate_transaction(std::string tx_hex) {
     std::vector<std::byte> tx_bytes = from_hex(tx_hex);
 
@@ -232,7 +241,7 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     printf("\n");
     printf("Has witness flag (0x0001): %s\n", has_witness ? "YES" : "NO");
 
-    // Use btck::Transaction wrapper - automatically manages memory
+    // Use btck::Transaction wrapper
     btck::Transaction tx(tx_bytes);
 
     // Get txid using wrapper API
@@ -244,21 +253,16 @@ static ValidationResult validate_transaction(std::string tx_hex) {
     size_t input_count = tx.CountInputs();
     printf("Input count: %zu\n", input_count);
 
-    // Storage for per-input artifacts - using wrapper classes (RAII)
-    std::vector<btck::ScriptPubkey> spks;
-    std::vector<btck::TransactionOutput> spent_outputs;
-    std::vector<uint64_t> amounts_sats;
-
-    spks.reserve(input_count);
-    spent_outputs.reserve(input_count);
-    amounts_sats.reserve(input_count);
+    // Storage for per-input validation data - single pass collection
+    std::vector<InputValidationData> input_data;
+    input_data.reserve(input_count);
 
     printf("\n=== PROCESSING INPUTS ===\n");
 
+    // Collect all input data in one pass
     for (size_t i = 0; i < input_count; i++) {
         printf("\n--- Input %zu ---\n", i);
         
-        // Get input using wrapper - returns a view
         auto input_view = tx.GetInput(i);
         auto out_point_view = input_view.OutPoint();
         auto out_point_txid_view = out_point_view.Txid();
@@ -270,7 +274,7 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         printf("Prevout: %s:%u\n", out_point_txid_hex.c_str(), out_point_index);
 
         // Query UTXO set
-        nlohmann::json result = rpc_call_gettxout(out_point_txid_hex, out_point_index, /*include_mempool=*/false);
+        nlohmann::json result = rpc_call_gettxout(out_point_txid_hex, out_point_index, false);
         if (result.is_null() || !result.contains("scriptPubKey") ||
             !result["scriptPubKey"].contains("hex") || !result.contains("value")) {
             throw std::runtime_error("Missing prevout data for " + out_point_txid_hex + ":" + std::to_string(out_point_index));
@@ -279,51 +283,45 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         std::string spk_hex = result["scriptPubKey"]["hex"].get<std::string>();
         std::vector<std::byte> spk_bytes = from_hex(spk_hex);
 
-        // Debug: Script type
+        // Determine script type once
         std::string script_type = get_script_type(spk_bytes);
         printf("ScriptPubKey hex: %s\n", spk_hex.c_str());
         printf("Script type: %s\n", script_type.c_str());
 
-        // Create ScriptPubkey using wrapper - RAII handles memory
+        // Create ScriptPubkey using wrapper
         btck::ScriptPubkey spk(spk_bytes);
 
         // Parse value in sats
         uint64_t value_sats = btc_to_sats(result["value"]);
         printf("Value: %lu sats\n", value_sats);
 
-        // Create TransactionOutput using wrapper - RAII handles memory
-        btck::TransactionOutput out(spk, static_cast<int64_t>(value_sats));
+        // Create TransactionOutput using wrapper
+        btck::TransactionOutput tx_out(spk, static_cast<int64_t>(value_sats));
 
-        // Store - move semantics avoid unnecessary copies
-        spks.push_back(std::move(spk));
-        spent_outputs.push_back(std::move(out));
-        amounts_sats.push_back(value_sats);
+        // Store all data together - avoids redundant lookups
+        input_data.emplace_back(
+            std::move(out_point_txid_hex),
+            out_point_index,
+            std::move(script_type),
+            value_sats,
+            std::move(spk),
+            std::move(tx_out)
+        );
     }
 
     printf("\n=== VERIFICATION PHASE ===\n");
 
-    // Store script types for debugging
-    std::vector<std::string> script_types;
-    for (size_t i = 0; i < input_count; ++i) {
-        auto input_view = tx.GetInput(i);
-        auto out_point_view = input_view.OutPoint();
-        auto out_point_txid_view = out_point_view.Txid();
-        uint32_t out_point_index = out_point_view.index();
-
-        auto out_point_txid_bytes = out_point_txid_view.ToBytes();
-        std::string out_point_txid_hex = TxidToHexReversed(out_point_txid_bytes);
-
-        nlohmann::json result = rpc_call_gettxout(out_point_txid_hex, out_point_index, false);
-        std::string spk_hex = result["scriptPubKey"]["hex"].get<std::string>();
-        std::vector<std::byte> spk_bytes = from_hex(spk_hex);
-        script_types.push_back(get_script_type(spk_bytes));
+    // Build spent_outputs vector from collected data
+    std::vector<btck::TransactionOutput> spent_outputs;
+    spent_outputs.reserve(input_count);
+    for (const auto& data : input_data) {
+        spent_outputs.push_back(btck::TransactionOutput(data.tx_output));
     }
 
     // Verification pass: one call per input
     for (size_t i = 0; i < input_count; ++i) {
-        const btck::ScriptPubkey& spk_i = spks[i];
-        int64_t amount_i = static_cast<int64_t>(amounts_sats[i]);
-
+        const auto& data = input_data[i];
+        
         btck::ScriptVerifyStatus status = btck::ScriptVerifyStatus::OK;
         unsigned int input_index = static_cast<unsigned int>(i);
 
@@ -331,13 +329,13 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         btck::ScriptVerificationFlags flags = btck::ScriptVerificationFlags::ALL;
 
         printf("\nVerifying input %zu:\n", i);
-        printf("  Amount: %ld sats\n", amount_i);
-        printf("  Script type: %s\n", script_types[i].c_str());
+        printf("  Amount: %lu sats\n", data.amount_sats);
+        printf("  Script type: %s\n", data.script_type.c_str());
         printf("  Flags: 0x%x (ALL)\n", static_cast<unsigned int>(flags));
 
-        // Use wrapper's Verify method - takes std::span
-        bool result = spk_i.Verify(
-            amount_i,
+        // Use wrapper's Verify method with std::span
+        bool result = data.script_pubkey.Verify(
+            static_cast<int64_t>(data.amount_sats),
             tx,
             std::span<const btck::TransactionOutput>(spent_outputs),
             input_index,
@@ -346,15 +344,12 @@ static ValidationResult validate_transaction(std::string tx_hex) {
         );
 
         if (result) {
-            // success for this input
             printf("  Result: SUCCESS\n");
         } else {
-            // Log detailed failure info
             printf("  Result: FAILED\n");
             printf("  Status code: %d (%s)\n", static_cast<int>(status), status_to_string(status).c_str());
             printf("  Transaction has witness: %s\n", has_witness ? "YES" : "NO");
 
-            // Throw exception with status information
             std::string error_msg = "Input " + std::to_string(i) + " verify failed (status=" + status_to_string(status) + ")";
             throw ValidationError(error_msg, status, i);
         }
@@ -364,16 +359,15 @@ static ValidationResult validate_transaction(std::string tx_hex) {
 
     // Compute fee (sum(inputs) - sum(outputs))
     int64_t sum_inputs_sats = 0;
-    for (size_t i = 0; i < amounts_sats.size(); ++i) {
-        sum_inputs_sats += static_cast<int64_t>(amounts_sats[i]);
+    for (const auto& data : input_data) {
+        sum_inputs_sats += static_cast<int64_t>(data.amount_sats);
     }
 
     int64_t sum_outputs_sats = 0;
     size_t output_count = tx.CountOutputs();
     for (size_t i = 0; i < output_count; ++i) {
         auto out_view = tx.GetOutput(i);
-        int64_t amt_i = out_view.Amount();
-        sum_outputs_sats += amt_i;
+        sum_outputs_sats += out_view.Amount();
     }
 
     int64_t fee_sats = sum_inputs_sats - sum_outputs_sats;
@@ -383,7 +377,6 @@ static ValidationResult validate_transaction(std::string tx_hex) {
 
     printf("\n=== VALIDATION COMPLETE ===\n\n");
 
-    // No manual cleanup needed - RAII handles everything!
     return ValidationResult{txid_hex, fee_sats};
 }
 
@@ -400,7 +393,7 @@ int main() {
         try {
             std::string tx_hex = body["tx_hex"].s();
 
-            // Call the extracted validation function
+            // Call the validation function
             ValidationResult result = validate_transaction(tx_hex);
 
             // Build response
