@@ -364,6 +364,92 @@ struct ValidationResult {
     int64_t fee_sats;
 };
 
+// ============================================================================
+// MEMPOOL DATA STRUCTURES
+// ============================================================================
+
+// Mempool entry structure - optimized for fee rate ordering
+struct MempoolEntry {
+    std::string txid;
+    std::string tx_hex;
+    int64_t fee_sats;
+    size_t tx_size;  // in bytes
+    double fee_rate; // sats per byte
+    
+    MempoolEntry(std::string id, std::string hex, int64_t fee, size_t size)
+        : txid(std::move(id))
+        , tx_hex(std::move(hex))
+        , fee_sats(fee)
+        , tx_size(size)
+        , fee_rate(size > 0 ? static_cast<double>(fee) / size : 0.0)
+    {}
+    
+    // Comparator for ordering by fee rate (descending - highest fee first)
+    bool operator<(const MempoolEntry& other) const {
+        // Higher fee rate comes first
+        if (fee_rate != other.fee_rate) {
+            return fee_rate > other.fee_rate;
+        }
+        // If same fee rate, order by txid for deterministic ordering
+        return txid < other.txid;
+    }
+};
+
+// Thread-safe mempool with automatic fee rate ordering
+struct Mempool {
+    std::multiset<MempoolEntry> entries;  // Automatically sorted by fee rate
+    mutable std::mutex mutex;
+    
+    void add(MempoolEntry entry) {
+        std::lock_guard<std::mutex> lock(mutex);
+        
+        // Check if transaction already exists
+        for (const auto& e : entries) {
+            if (e.txid == entry.txid) {
+                throw std::runtime_error("Transaction already in mempool");
+            }
+        }
+        
+        entries.insert(std::move(entry));
+        
+        std::ostringstream log;
+        log << "Added to mempool: " << entry.txid 
+            << " (fee_rate: " << entry.fee_rate << " sats/byte)";
+        LOG_INFO(log.str());
+    }
+    
+    std::vector<MempoolEntry> get_all() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return std::vector<MempoolEntry>(entries.begin(), entries.end());
+    }
+    
+    bool remove(const std::string& txid) {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto it = entries.begin(); it != entries.end(); ++it) {
+            if (it->txid == txid) {
+                entries.erase(it);
+                LOG_INFO("Removed from mempool: " + txid);
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return entries.size();
+    }
+    
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex);
+        entries.clear();
+        LOG_INFO("Mempool cleared");
+    }
+};
+
+// Global mempool instance
+static Mempool g_mempool;
+
 // Validation error exception with status
 class ValidationError : public std::runtime_error {
 public:
@@ -888,6 +974,108 @@ int main() {
         res["detected_threads"] = g_parallel_config.get_thread_count();
         
         LOG_INFO("Parallel verification config updated");
+        
+        return crow::response(200, res);
+    });
+
+    // POST /mempool/add - Add transaction to private mempool
+    CROW_ROUTE(app, "/mempool/add").methods("POST"_method)([](const crow::request& req){
+        auto body = crow::json::load(req.body);
+        if (!body || !body.has("tx_hex")) {
+            return crow::response(400, "Missing tx_hex");
+        }
+        
+        try {
+            std::string tx_hex = body["tx_hex"].s();
+            LOG_INFO("Received mempool add request");
+            
+            // Reuse validate_transaction to ensure transaction is valid
+            ValidationResult result = validate_transaction(tx_hex);
+            
+            // Get transaction size for fee rate calculation
+            std::vector<std::byte> tx_bytes = from_hex(tx_hex);
+            size_t tx_size = tx_bytes.size();
+            
+            // Create mempool entry (automatically calculates fee rate)
+            MempoolEntry entry(result.txid, tx_hex, result.fee_sats, tx_size);
+            
+            // Add to mempool (will be automatically ordered by fee rate)
+            g_mempool.add(entry);
+            
+            // Build response
+            crow::json::wvalue res;
+            res["txid"] = entry.txid;
+            res["fee_sats"] = entry.fee_sats;
+            res["size_bytes"] = entry.tx_size;
+            res["fee_rate"] = entry.fee_rate;
+            res["message"] = "Transaction added to mempool";
+            res["mempool_size"] = g_mempool.size();
+            
+            return crow::response(200, res);
+            
+        } catch (const ValidationError& e) {
+            std::ostringstream err_msg;
+            err_msg << "Validation error, transaction rejected: " << e.what();
+            LOG_ERROR(err_msg.str());
+            
+            crow::json::wvalue error_res;
+            error_res["error"] = e.what();
+            error_res["status"] = static_cast<int>(e.status);
+            error_res["status_name"] = status_to_string(e.status);
+            error_res["input_index"] = static_cast<int>(e.input_index);
+            
+            return crow::response(400, error_res);
+        } catch (const std::exception& e) {
+            LOG_ERROR(std::string("Mempool add failed: ") + e.what());
+            return crow::response(400, std::string("error: ") + e.what());
+        }
+    });
+
+    // GET /mempool - List all transactions ordered by fee rate (highest first)
+    CROW_ROUTE(app, "/mempool").methods("GET"_method)([](){
+        auto entries = g_mempool.get_all();
+        
+        crow::json::wvalue res;
+        res["count"] = entries.size();
+        
+        std::vector<crow::json::wvalue> txs;
+        for (const auto& entry : entries) {
+            crow::json::wvalue tx;
+            tx["txid"] = entry.txid;
+            tx["fee_sats"] = entry.fee_sats;
+            tx["size_bytes"] = entry.tx_size;
+            tx["fee_rate"] = entry.fee_rate;
+            // Optionally include tx_hex if needed:
+            // tx["tx_hex"] = entry.tx_hex;
+            txs.push_back(std::move(tx));
+        }
+        res["transactions"] = std::move(txs);
+        
+        return crow::response(200, res);
+    });
+
+    // DELETE /mempool/<txid> - Remove transaction from mempool
+    CROW_ROUTE(app, "/mempool/<string>").methods("DELETE"_method)([](const std::string& txid){
+        bool removed = g_mempool.remove(txid);
+        
+        if (removed) {
+            crow::json::wvalue res;
+            res["message"] = "Transaction removed from mempool";
+            res["txid"] = txid;
+            res["mempool_size"] = g_mempool.size();
+            return crow::response(200, res);
+        } else {
+            return crow::response(404, "Transaction not found in mempool");
+        }
+    });
+
+    // POST /mempool/clear - Clear all transactions from mempool
+    CROW_ROUTE(app, "/mempool/clear").methods("POST"_method)([](){
+        g_mempool.clear();
+        
+        crow::json::wvalue res;
+        res["message"] = "Mempool cleared";
+        res["mempool_size"] = 0;
         
         return crow::response(200, res);
     });
