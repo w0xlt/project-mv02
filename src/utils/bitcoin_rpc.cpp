@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <cstdlib>
+#include <cassert>
 
 BitcoinRPC::BitcoinRPC(const std::string& rpc_url) : rpc_url_(rpc_url) {}
 
@@ -23,13 +24,7 @@ std::pair<std::string, std::string> BitcoinRPC::split_userpass(const std::string
     return { up.substr(0, pos), up.substr(pos + 1) };
 }
 
-nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool include_mempool) {
-    nlohmann::json body = {
-        {"jsonrpc", "1.0"},
-        {"id", "crow"},
-        {"method", "gettxout"},
-        {"params", { txid, vout, include_mempool }}
-    };
+nlohmann::json BitcoinRPC::process_request(const nlohmann::json& body) {
     std::string body_str = body.dump();
 
     auto up = split_userpass(read_cookie());
@@ -56,6 +51,17 @@ nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool inc
     } else {
         throw std::runtime_error("RPC error: " + j["error"].dump());
     }
+}
+
+nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool include_mempool) {
+    nlohmann::json body = {
+        {"jsonrpc", "1.0"},
+        {"id", "crow"},
+        {"method", "gettxout"},
+        {"params", { txid, vout, include_mempool }}
+    };
+
+    return process_request(body);
 }
 
 uint64_t BitcoinRPC::btc_to_sats(const nlohmann::json& jnum) {
