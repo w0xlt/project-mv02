@@ -42,8 +42,7 @@ void setup_kernel_logging() {
     // Create the kernel logger
     auto handler = std::make_unique<KernelLogHandler>();
     g_kernel_logger = std::make_unique<btck::Logger<KernelLogHandler>>(
-        std::move(handler), 
-        log_opts
+        std::move(handler)
     );
     
     LOG_INFO("Bitcoinkernel logging initialized");
