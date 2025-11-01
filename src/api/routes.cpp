@@ -278,6 +278,50 @@ void register_legacy_routes(crow::SimpleApp& app) {
             return crow::response(500, std::string("RPC failed: ") + e.what());
         }
     });
+
+    // POST /getblocktemplate - legacy RPC
+    CROW_ROUTE(app, "/getblocktemplate").methods("POST"_method)([](const crow::request& req){
+        auto j = crow::json::load(req.body);
+        if (!j) {
+            CROW_LOG_WARNING << "JSON parse failed. Body: " << req.body;
+            return crow::response(400, "Invalid JSON (use plain ASCII quotes)");
+        }
+        if (!j.has("mode"))
+        {
+            return crow::response(400, "Missing getblocktemplate mode");
+        }
+        try {
+            std::string mode = j["mode"].s();
+            nlohmann::json rules = nlohmann::json::array();
+
+            if (j.has("rules")) {
+                rules = nlohmann::json(j["rules"]);
+            } else {
+                rules.push_back(BlockTemplateRules::SEGWIT);
+            }
+
+            if (mode == BlockTemplateMode::PROPOSAL){
+                if (!j.has("data")) {
+                    return crow::response(400, std::string("Missing data for") + std::string(BlockTemplateMode::PROPOSAL) + std::string(" mode"));
+                }
+            } else {
+                if (j.has("data")) {
+                    return crow::response(400, std::string("Data must not be set for mode: ") + mode);
+                }
+            }
+            std::string data = j.has("data") ? std::string(j["data"].s()) : "";
+
+            BitcoinRPC rpc;
+            nlohmann::json result = rpc.get_blocktemplate(mode, rules, data);
+
+            crow::response r(200);
+            r.set_header("Content-Type", "application/json");
+            r.write(result.dump());
+            return r;
+        } catch (const std::exception& e) {
+            return crow::response(500, std::string("RPC failed: ") + e.what());
+        }
+    });
 }
 
 // Register all routes

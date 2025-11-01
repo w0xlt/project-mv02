@@ -74,6 +74,7 @@ def main():
 
     # 2) For each txid: getrawtransaction, POST to /verify with {"tx_hex": "..."}
     processed = 0
+
     for txid in txids:
         if args.verbose and processed % 100 == 0:
             print(f"    ... at {processed}/{len(txids)}")
@@ -115,6 +116,9 @@ def main():
         processed += 1
 
     print(f"[OK] All {processed} transactions passed.")
+
+    response = http_post_json("http://127.0.0.1:8080/getblocktemplate", {"mode": "template"}, timeout=args.timeout)
+    print(response)
 
 if __name__ == "__main__":
     main()
