@@ -3,6 +3,18 @@
 #include <string>
 #include <nlohmann/json.hpp>
 
+
+struct BlockTemplateMode {
+    static constexpr std::string_view TEMPLATE = "template";
+    static constexpr std::string_view PROPOSAL = "proposal";
+    static constexpr std::string_view OMITTED  = "omitted";
+};
+
+struct BlockTemplateRules {
+    static constexpr std::string_view SEGWIT = "segwit";
+};
+
+
 // Bitcoin RPC client
 class BitcoinRPC {
 public:
@@ -10,6 +22,9 @@ public:
 
     // Call gettxout RPC method
     nlohmann::json get_txout(const std::string& txid, int vout, bool include_mempool);
+
+    // Call getblocktemplate PRC method
+    nlohmann::json get_blocktemplate(const std::string& blocktemplate_mode, const nlohmann::json& blocktemplate_rules, const std::string& block_data = "");
 
     // Convert BTC to satoshis
     static uint64_t btc_to_sats(const nlohmann::json& jnum);

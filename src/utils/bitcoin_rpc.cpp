@@ -64,6 +64,28 @@ nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool inc
     return process_request(body);
 }
 
+nlohmann::json BitcoinRPC::get_blocktemplate(const std::string& blocktemplate_mode, const nlohmann::json& blocktemplate_rules, const std::string& block_data)
+{
+    nlohmann::json params = {
+        {"mode", blocktemplate_mode},
+        {"rules", blocktemplate_rules},  // at least "segwit" is required
+    };
+
+    if (blocktemplate_mode == BlockTemplateMode::PROPOSAL) {
+        assert(!block_data.empty());
+        params["data"] = block_data;
+    }
+
+    nlohmann::json body = {
+        {"jsonrpc", "1.0"},
+        {"id", "crow"},
+        {"method", "getblocktemplate"},
+        {"params", params}
+    };
+
+    return process_request(body);
+}
+
 uint64_t BitcoinRPC::btc_to_sats(const nlohmann::json& jnum) {
     double btc_value = jnum.get<double>();
     return static_cast<uint64_t>(std::round(btc_value * 100000000.0));
