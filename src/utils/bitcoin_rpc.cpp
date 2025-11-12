@@ -64,7 +64,7 @@ nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool inc
     return process_request(body);
 }
 
-nlohmann::json BitcoinRPC::get_blocktemplate(const std::string& blocktemplate_mode, const nlohmann::json& blocktemplate_rules, const std::string& block_data)
+nlohmann::json BitcoinRPC::get_blocktemplate(std::string_view blocktemplate_mode, const nlohmann::json& blocktemplate_rules, const std::string& block_data)
 {
     nlohmann::json params = {
         {"template_request", {

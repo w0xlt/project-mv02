@@ -6,7 +6,65 @@
 #include "utils/hex_utils.h"
 #include "utils/bitcoin_rpc.h"
 #include "logging/logging.h"
+#include "blockassembly/block_assembly.h"
 #include <sstream>
+
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <array>
+#include <optional>
+#include <algorithm>
+
+/* -------------------- Hex & helpers -------------------- */
+static std::string hex_encode(const std::vector<uint8_t>& v) {
+    static const char* k = "0123456789abcdef";
+    std::string s; s.reserve(v.size()*2);
+    for (uint8_t b : v) { s.push_back(k[b>>4]); s.push_back(k[b&0xF]); }
+    return s;
+}
+static std::vector<uint8_t> hex_decode(const std::string& h) {
+    auto nyb = [](char c)->int{
+        if (c>='0'&&c<='9') return c-'0';
+        if (c>='a'&&c<='f') return c-'a'+10;
+        if (c>='A'&&c<='F') return c-'A'+10;
+        return -1;
+    };
+    if (h.size()%2) throw std::runtime_error("hex odd length");
+    std::vector<uint8_t> out; out.reserve(h.size()/2);
+    for (size_t i=0;i<h.size();i+=2) {
+        int hi=nyb(h[i]), lo=nyb(h[i+1]);
+        if (hi<0||lo<0) throw std::runtime_error("hex invalid");
+        out.push_back(uint8_t((hi<<4)|lo));
+    }
+    return out;
+}
+// Print a 32-byte little-endian hash in user-facing big-endian hex (RPC style)
+static std::string hex_rev(const std::array<uint8_t,32>& h_le) {
+    static const char* k = "0123456789abcdef";
+    std::string s; s.reserve(64);
+    for (int i=31;i>=0;--i) { uint8_t b=h_le[i]; s.push_back(k[b>>4]); s.push_back(k[b&0xF]); }
+    return s;
+}
+static std::array<uint8_t,32> hex256_le(const std::string& hex_be) {
+    auto v = hex_decode(hex_be);
+    if (v.size()!=32) throw std::runtime_error("hex256_le expects 32 bytes");
+    std::array<uint8_t,32> a{}; for (int i=0;i<32;++i) a[i]=v[31-i]; return a;
+}
+static uint32_t parse_bits_be_to_uint32_t(const std::string& bits_hex_be) {
+    auto v = hex_decode(bits_hex_be);
+    if (v.size()!=4) throw std::runtime_error("bits must be 4 bytes");
+    return (uint32_t(v[0])<<24)|(uint32_t(v[1])<<16)|(uint32_t(v[2])<<8)|uint32_t(v[3]); // write LE later
+}
+
+static bool contains_rule(const nlohmann::json& tpl, const std::string& rule) {
+    if (!tpl.contains("rules")) return false;
+    for (const auto& r : tpl["rules"]) if (r.get<std::string>()==rule) return true;
+    return false;
+}
 
 // Validation routes
 void register_validation_routes(crow::SimpleApp& app) {
@@ -290,6 +348,14 @@ void register_legacy_routes(crow::SimpleApp& app) {
         {
             return crow::response(400, "Missing getblocktemplate mode");
         }
+        std::vector<uint8_t> payout_script = {0x51};
+        /* TODO
+        if (j.has("payout_script"))
+        {
+
+            payout_script = nlohmann::json(j["rules"]);
+        }
+        */
         try {
             std::string mode = j["mode"].s();
             nlohmann::json rules = nlohmann::json::array();
@@ -312,11 +378,57 @@ void register_legacy_routes(crow::SimpleApp& app) {
             std::string data = j.has("data") ? std::string(j["data"].s()) : "";
 
             BitcoinRPC rpc;
-            nlohmann::json result = rpc.get_blocktemplate(mode, rules, data);
 
+            // ask for a block template
+            nlohmann::json result = rpc.get_blocktemplate(BlockTemplateMode::TEMPLATE, rules);
+
+            // is a segwit block?
+            bool segwit_active = contains_rule(result,"segwit") || result.contains("default_witness_commitment");
+
+            // extract inputs fro block assembly
+            std::vector<std::vector<uint8_t>> non_cb_txs;
+            non_cb_txs.reserve(result["transactions"].size());
+
+            for (const auto& t : result["transactions"]) non_cb_txs.push_back(hex_decode(t.at("data").get<std::string>()));
+            std::optional<std::array<uint8_t,32>> txid0_le;
+            if (!non_cb_txs.empty() && result["transactions"][0].contains("txid")) {
+                txid0_le = hex256_le(result["transactions"][0]["txid"].get<std::string>());
+            }
+
+            blkasm::GbtBlockTemplateData in;
+            in.version      = result.at("version").get<int32_t>();
+            in.prev_hash_le = hex256_le(result.at("previousblockhash").get<std::string>());
+            in.curtime      = result.at("curtime").get<uint32_t>();
+            in.bits_u32     = parse_bits_be_to_uint32_t(result.at("bits").get<std::string>());
+            in.coinbase_value = result.at("coinbasevalue").get<int64_t>();
+            in.height       = result.at("height").get<int32_t>();
+            if (result.contains("coinbaseaux") && result["coinbaseaux"].contains("flags")) {
+                in.coinbase_flags = hex_decode(result["coinbaseaux"]["flags"].get<std::string>());
+            }
+            in.segwit_active = segwit_active;
+            in.non_cb_tx_bytes = non_cb_txs;
+            in.first_non_cb_expected_txid_le = txid0_le;
+
+            // Assemble full block (no network/RPC dependencies here)
+            auto block_proposal = blkasm::assemble_block_proposal(in, payout_script);
+
+            // Propose the block
+            auto blk_hex = hex_encode(block_proposal.block_bytes);
+            nlohmann::json res = rpc.get_blocktemplate(BlockTemplateMode::PROPOSAL, rules, blk_hex);
             crow::response r(200);
             r.set_header("Content-Type", "application/json");
-            r.write(result.dump());
+            if (res.is_null())
+            {
+                r.write("Valid Block");
+            } else {
+                r.write(res.dump());
+            }
+            // generate new block template with mempool
+
+            // validate the new block template with getblocktemplate but with the proposal mode
+
+            // return the new block template already validated
+
             return r;
         } catch (const std::exception& e) {
             return crow::response(500, std::string("RPC failed: ") + e.what());

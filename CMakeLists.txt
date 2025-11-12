@@ -20,6 +20,16 @@ find_package(asio CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(cpr CONFIG REQUIRED)
 
+
+# === Efficient SHA-256 from consolidated_sha.txt (reusing its CMake shape) ===
+add_library(sha256_mini
+    external/sha256mini/src/sha256_portable.cpp
+    external/sha256mini/src/sha256_dispatch.cpp
+    external/sha256mini/src/cpufeatures.cpp
+    external/sha256mini/src/sha256_avx2.cpp
+)
+target_include_directories(sha256_mini PUBLIC external/sha256mini/include)
+
 # Source files organized by module
 set(LOGGING_SOURCES
     src/logging/logging.cpp
@@ -40,6 +50,10 @@ set(MEMPOOL_SOURCES
     src/mempool/mempool.cpp
 )
 
+set(BLOCKASSEMBLY_SOURCES
+    src/blockassembly/block_assembly.cpp
+)
+
 set(API_SOURCES
     src/api/routes.cpp
 )
@@ -51,6 +65,7 @@ add_executable(bitcoinkernel_http
     ${UTILS_SOURCES}
     ${VALIDATION_SOURCES}
     ${MEMPOOL_SOURCES}
+    ${BLOCKASSEMBLY_SOURCES}
     ${API_SOURCES}
 )
 
@@ -70,6 +85,7 @@ target_link_libraries(bitcoinkernel_http PRIVATE
     asio::asio
     nlohmann_json::nlohmann_json
     cpr::cpr
+    sha256_mini
 )
 
 # Set RPATH for runtime linking
@@ -100,4 +116,5 @@ target_link_libraries(bitcoinkernel_http_lib PUBLIC
     asio::asio
     nlohmann_json::nlohmann_json
     cpr::cpr
+    sha256_mini
 )
