@@ -53,12 +53,13 @@ def main():
     ap.add_argument("--timeout", type=int, default=30, help="HTTP timeout seconds per verify call (default: 30)")
     ap.add_argument("--limit", type=int, default=0, help="If >0, only process this many txids (useful for quick tests).")
     ap.add_argument("--verbose", action="store_true", help="Print progress.")
+    ap.add_argument("--network", default="--chain=main", help="Change network to use the CLI commands.")
     args = ap.parse_args()
 
     # 1) Get mempool entries with details
     if args.verbose:
         print("[*] Fetching mempool with details ...")
-    mempool = run_cli(args.cli, "getrawmempool", "true")
+    mempool = run_cli(args.cli, args.network, "getrawmempool", "true")
     if not isinstance(mempool, dict):
         print("[ERROR] Unexpected getrawmempool output (expected JSON object).", file=sys.stderr)
         sys.exit(1)
@@ -79,7 +80,7 @@ def main():
         if args.verbose and processed % 100 == 0:
             print(f"    ... at {processed}/{len(txids)}")
 
-        raw = run_cli(args.cli, "getrawtransaction", txid)
+        raw = run_cli(args.cli, args.network, "getrawtransaction", txid)
         if not isinstance(raw, str) or not raw:
             print(f"[FAIL] getrawtransaction returned empty/non-text for {txid}", file=sys.stderr)
             print(f"[RESULT] First failing TXID: {txid}")
@@ -116,7 +117,8 @@ def main():
         processed += 1
 
     print(f"[OK] All {processed} transactions passed.")
-
+    raw = "02000000000101c36f4120c0fd8b355320a7be46df01d50954e9077eccd39f89baca746a39517d0000000000fdffffff0190e0f505000000002251200c0338144f641d77b7b5e30bec2cea9b67e7919ffbd182bbbb5262dfa3beb5a30140385996bcc9952ebe5b4226e375c2bc5558c7cfcb9fcd05f3c97ddb59e9d6d266aedaf85026e78f858903e7cbb962f938776ca26e7cc2d1230c7cd433aba49ef1f6af0100"
+    http_post_json("http://127.0.0.1:8080/mempool/add", {"tx_hex": raw}, timeout=30)
     response = http_post_json("http://127.0.0.1:8080/getblocktemplate", {"mode": "template"}, timeout=args.timeout)
     print(response)
 

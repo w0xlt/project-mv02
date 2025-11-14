@@ -7,6 +7,8 @@ namespace blkasm {
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 
+/** The amount of satoshis in one BTC. */
+static constexpr int64_t COIN = 100000000;
 /* -------- Small helpers (binary/varint/script) - exact behavior kept -------- */
 static void write_u32_le(std::vector<u8>& out, u32 v) {
     out.push_back(u8(v)); out.push_back(u8(v>>8)); out.push_back(u8(v>>16)); out.push_back(u8(v>>24));
@@ -38,6 +40,19 @@ static std::vector<u8> encode_scriptnum(std::int64_t v) {
     if (r.back()&0x80) r.push_back(neg?0x80:0x00);
     else if (neg) r.back()|=0x80;
     return r;
+}
+
+int64_t GetBlockSubsidy(std::int32_t nHeight)
+{
+    int halvings = nHeight / 210000;
+    // Force block reward to zero when right shift is undefined.
+    if (halvings >= 64)
+        return 0;
+
+    int64_t nSubsidy = 50 * COIN;
+    // Subsidy is cut in half every 210,000 blocks which will occur approximately every 4 years.
+    nSubsidy >>= halvings;
+    return nSubsidy;
 }
 
 /* -------------------- TX model -------------------- */
@@ -209,7 +224,7 @@ static Tx build_coinbase(std::int64_t coinbase_value,
     std::vector<u8> extranonce(8,0); auto epush = script_push_data(extranonce); ss.insert(ss.end(), epush.begin(), epush.end());
     cb.vin[0].scriptSig = std::move(ss);
 
-    cb.vout.push_back(TxOut{coinbase_value, payout_script});
+    cb.vout.push_back(TxOut{GetBlockSubsidy(height)+coinbase_value, payout_script});
     if (want_commitment) {
         cb.vout.push_back(TxOut{0, {}});              // placeholder
         cb.witness.resize(1); cb.witness[0].push_back(WitnessItem{std::vector<u8>(32,0)}); // reserved

@@ -10,9 +10,9 @@ BitcoinRPC::BitcoinRPC(const std::string& rpc_url) : rpc_url_(rpc_url) {}
 
 std::string BitcoinRPC::read_cookie() {
     const char* home = std::getenv("HOME");
-    std::string path = std::string(home ? home : "") + "/.bitcoin/.cookie";
+    std::string path = std::string(home ? home : "") + "/.bitcoin/testnet4/.cookie";
     std::ifstream f(path);
-    if (!f) throw std::runtime_error("cannot open ~/.bitcoin/.cookie");
+    if (!f) throw std::runtime_error("cannot open ~/.bitcoin/testnet4/.cookie");
     std::string s;
     std::getline(f, s);
     return s;
@@ -59,6 +59,17 @@ nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool inc
         {"id", "crow"},
         {"method", "gettxout"},
         {"params", { txid, vout, include_mempool }}
+    };
+
+    return process_request(body);
+}
+
+nlohmann::json BitcoinRPC::get_rawtransaction(const std::string& txid, int verbose) {
+    nlohmann::json body = {
+        {"jsonrpc", "1.0"},
+        {"id", "crow"},
+        {"method", "getrawtransaction"},
+        {"params", { txid, verbose }}
     };
 
     return process_request(body);
