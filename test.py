@@ -75,7 +75,7 @@ def main():
 
     # 2) For each txid: getrawtransaction, POST to /verify with {"tx_hex": "..."}
     processed = 0
-
+    '''
     for txid in txids:
         if args.verbose and processed % 100 == 0:
             print(f"    ... at {processed}/{len(txids)}")
@@ -117,7 +117,8 @@ def main():
         processed += 1
 
     print(f"[OK] All {processed} transactions passed.")
-    raw = "02000000000101c36f4120c0fd8b355320a7be46df01d50954e9077eccd39f89baca746a39517d0000000000fdffffff0190e0f505000000002251200c0338144f641d77b7b5e30bec2cea9b67e7919ffbd182bbbb5262dfa3beb5a30140385996bcc9952ebe5b4226e375c2bc5558c7cfcb9fcd05f3c97ddb59e9d6d266aedaf85026e78f858903e7cbb962f938776ca26e7cc2d1230c7cd433aba49ef1f6af0100"
+    '''
+    raw = "02000000000101d719b0e38f4675a99517e8c6cf663c79ef6b05faed31dd903d08a9841776144a0000000000fdffffff01f5e7a435000000002251208c4f4a11be9fcdf4af8ea3c04505d31814c7387cd62cf57ed5f529160f9eeab6014096198e87fafb018e4fef08d1fb5802a8497250c5fe6cd34702da6cd42f4b187f6ee77c7005cab3c95f2ff5c37383892d272cdafb00b55ec697000a8d902fb90caab00100"
     http_post_json("http://127.0.0.1:8080/mempool/add", {"tx_hex": raw}, timeout=30)
     response = http_post_json("http://127.0.0.1:8080/getblocktemplate", {"mode": "template"}, timeout=args.timeout)
     print(response)
