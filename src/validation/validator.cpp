@@ -2,9 +2,7 @@
 #include "validation/script_cache.h"
 #include "validation/parallel_config.h"
 #include "utils/hex_utils.h"
-#include "utils/bitcoin_rpc.h"
 #include "logging/logging.h"
-#include "kernel/bitcoinkernel_wrapper.h"
 #include <vector>
 #include <sstream>
 #include <iomanip>
@@ -14,26 +12,6 @@
 // ValidationError constructor implementation
 ValidationError::ValidationError(const std::string& msg, ScriptVerifyStatusType s, size_t idx)
     : std::runtime_error(msg), status(s), input_index(idx) {}
-
-// Structure to hold per-input validation data
-struct InputValidationData {
-    std::string prevout_txid;
-    uint32_t prevout_index;
-    std::string script_type;
-    uint64_t amount_sats;
-    btck::ScriptPubkey script_pubkey;
-    btck::TransactionOutput tx_output;
-
-    InputValidationData(std::string txid, uint32_t idx, std::string type, 
-                       uint64_t amt, btck::ScriptPubkey spk, btck::TransactionOutput out)
-        : prevout_txid(std::move(txid))
-        , prevout_index(idx)
-        , script_type(std::move(type))
-        , amount_sats(amt)
-        , script_pubkey(std::move(spk))
-        , tx_output(std::move(out))
-    {}
-};
 
 // Structure to hold the result of a single input verification
 struct InputVerificationResult {
@@ -86,7 +64,7 @@ static void log_transaction_info(const std::vector<std::byte>& tx_bytes) {
 }
 
 // Helper to collect input validation data
-static std::vector<InputValidationData> collect_input_data(
+std::vector<InputValidationData> collect_input_data(
     const btck::Transaction& tx, 
     BitcoinRPC& rpc) 
 {
@@ -111,15 +89,26 @@ static std::vector<InputValidationData> collect_input_data(
         prevout_info << "Prevout: " << out_point_txid_hex << ":" << out_point_index;
         LOG_DEBUG(prevout_info.str());
 
+        std::string spk_hex;
+        uint64_t value_sats;
         // Query UTXO set
         nlohmann::json result = rpc.get_txout(out_point_txid_hex, out_point_index, false);
-        if (result.is_null() || !result.contains("scriptPubKey") ||
-            !result["scriptPubKey"].contains("hex") || !result.contains("value")) {
-            throw std::runtime_error("Missing prevout data for " + out_point_txid_hex + 
+        if (result.is_null() || !result.contains("scriptPubKey") || !result["scriptPubKey"].contains("hex")
+         || !result.contains("value"))
+        {
+            nlohmann::json rawtx_result = rpc.get_rawtransaction(out_point_txid_hex, /*verbose=*/2);
+            if (rawtx_result.contains("error") && !rawtx_result["error"].is_null()) {
+                throw std::runtime_error("Missing prevout data for " + out_point_txid_hex + 
                                    ":" + std::to_string(out_point_index));
+            }
+            spk_hex = rawtx_result["vout"][out_point_index]["scriptPubKey"]["hex"].get<std::string>();
+            value_sats = BitcoinRPC::btc_to_sats(rawtx_result["vout"][out_point_index]["value"]);
+
+        } else {
+            spk_hex = result["scriptPubKey"]["hex"].get<std::string>();
+            value_sats = BitcoinRPC::btc_to_sats(result["value"]);
         }
 
-        std::string spk_hex = result["scriptPubKey"]["hex"].get<std::string>();
         std::vector<std::byte> spk_bytes = from_hex(spk_hex);
 
         // Determine script type using cache
@@ -136,9 +125,6 @@ static std::vector<InputValidationData> collect_input_data(
         // Create ScriptPubkey using wrapper
         btck::ScriptPubkey spk(spk_bytes);
 
-        // Parse value in sats
-        uint64_t value_sats = BitcoinRPC::btc_to_sats(result["value"]);
-        
         std::ostringstream value_info;
         value_info << "Value: " << value_sats << " sats";
         LOG_DEBUG(value_info.str());

@@ -4,14 +4,15 @@
 #include <stdexcept>
 #include <cmath>
 #include <cstdlib>
+#include <cassert>
 
 BitcoinRPC::BitcoinRPC(const std::string& rpc_url) : rpc_url_(rpc_url) {}
 
 std::string BitcoinRPC::read_cookie() {
     const char* home = std::getenv("HOME");
-    std::string path = std::string(home ? home : "") + "/.bitcoin/.cookie";
+    std::string path = std::string(home ? home : "") + "/.bitcoin/testnet4/.cookie";
     std::ifstream f(path);
-    if (!f) throw std::runtime_error("cannot open ~/.bitcoin/.cookie");
+    if (!f) throw std::runtime_error("cannot open ~/.bitcoin/testnet4/.cookie");
     std::string s;
     std::getline(f, s);
     return s;
@@ -23,13 +24,7 @@ std::pair<std::string, std::string> BitcoinRPC::split_userpass(const std::string
     return { up.substr(0, pos), up.substr(pos + 1) };
 }
 
-nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool include_mempool) {
-    nlohmann::json body = {
-        {"jsonrpc", "1.0"},
-        {"id", "crow"},
-        {"method", "gettxout"},
-        {"params", { txid, vout, include_mempool }}
-    };
+nlohmann::json BitcoinRPC::process_request(const nlohmann::json& body) {
     std::string body_str = body.dump();
 
     auto up = split_userpass(read_cookie());
@@ -56,6 +51,52 @@ nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool inc
     } else {
         throw std::runtime_error("RPC error: " + j["error"].dump());
     }
+}
+
+nlohmann::json BitcoinRPC::get_txout(const std::string& txid, int vout, bool include_mempool) {
+    nlohmann::json body = {
+        {"jsonrpc", "1.0"},
+        {"id", "crow"},
+        {"method", "gettxout"},
+        {"params", { txid, vout, include_mempool }}
+    };
+
+    return process_request(body);
+}
+
+nlohmann::json BitcoinRPC::get_rawtransaction(const std::string& txid, int verbose) {
+    nlohmann::json body = {
+        {"jsonrpc", "1.0"},
+        {"id", "crow"},
+        {"method", "getrawtransaction"},
+        {"params", { txid, verbose }}
+    };
+
+    return process_request(body);
+}
+
+nlohmann::json BitcoinRPC::get_blocktemplate(std::string_view blocktemplate_mode, const nlohmann::json& blocktemplate_rules, const std::string& block_data)
+{
+    nlohmann::json params = {
+        {"template_request", {
+            {"mode", blocktemplate_mode},
+            {"rules", blocktemplate_rules},  // at least "segwit" is required
+        }}
+    };
+
+    if (blocktemplate_mode == BlockTemplateMode::PROPOSAL) {
+        assert(!block_data.empty());
+        params["template_request"]["data"] = block_data;
+    }
+
+    nlohmann::json body = {
+        {"jsonrpc", "1.0"},
+        {"id", "crow"},
+        {"method", "getblocktemplate"},
+        {"params", params}
+    };
+
+    return process_request(body);
 }
 
 uint64_t BitcoinRPC::btc_to_sats(const nlohmann::json& jnum) {

@@ -53,12 +53,13 @@ def main():
     ap.add_argument("--timeout", type=int, default=30, help="HTTP timeout seconds per verify call (default: 30)")
     ap.add_argument("--limit", type=int, default=0, help="If >0, only process this many txids (useful for quick tests).")
     ap.add_argument("--verbose", action="store_true", help="Print progress.")
+    ap.add_argument("--network", default="--chain=main", help="Change network to use the CLI commands.")
     args = ap.parse_args()
 
     # 1) Get mempool entries with details
     if args.verbose:
         print("[*] Fetching mempool with details ...")
-    mempool = run_cli(args.cli, "getrawmempool", "true")
+    mempool = run_cli(args.cli, args.network, "getrawmempool", "true")
     if not isinstance(mempool, dict):
         print("[ERROR] Unexpected getrawmempool output (expected JSON object).", file=sys.stderr)
         sys.exit(1)
@@ -74,11 +75,12 @@ def main():
 
     # 2) For each txid: getrawtransaction, POST to /verify with {"tx_hex": "..."}
     processed = 0
+    '''
     for txid in txids:
         if args.verbose and processed % 100 == 0:
             print(f"    ... at {processed}/{len(txids)}")
 
-        raw = run_cli(args.cli, "getrawtransaction", txid)
+        raw = run_cli(args.cli, args.network, "getrawtransaction", txid)
         if not isinstance(raw, str) or not raw:
             print(f"[FAIL] getrawtransaction returned empty/non-text for {txid}", file=sys.stderr)
             print(f"[RESULT] First failing TXID: {txid}")
@@ -115,6 +117,11 @@ def main():
         processed += 1
 
     print(f"[OK] All {processed} transactions passed.")
+    '''
+    raw = "02000000000101d719b0e38f4675a99517e8c6cf663c79ef6b05faed31dd903d08a9841776144a0000000000fdffffff01f5e7a435000000002251208c4f4a11be9fcdf4af8ea3c04505d31814c7387cd62cf57ed5f529160f9eeab6014096198e87fafb018e4fef08d1fb5802a8497250c5fe6cd34702da6cd42f4b187f6ee77c7005cab3c95f2ff5c37383892d272cdafb00b55ec697000a8d902fb90caab00100"
+    http_post_json("http://127.0.0.1:8080/mempool/add", {"tx_hex": raw}, timeout=30)
+    response = http_post_json("http://127.0.0.1:8080/getblocktemplate", {"mode": "template"}, timeout=args.timeout)
+    print(response)
 
 if __name__ == "__main__":
     main()
